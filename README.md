@@ -18,7 +18,7 @@ Requirements: Windows, original **Resident Evil 4 UHD** on Steam, and owned **Mi
 
 Minecraft starts with a hidden window and keeps running as a real background game process. The release reads your locally installed game files and uses a separate private world. Your original mods, worlds and account files are preserved. If your Java runtime is older than 25.0.4, Setup downloads a checksum-verified portable Temurin runtime into the release folder; it does not replace your system Java.
 
-Press F8 for steve mod, Beamng is F7, although Beamng remains a concept, it still barely works.
+Press F8 for steve mod
 
 See the [simple install guide](INSTALL.md) for controls, uninstall and troubleshooting. Java/Fabric build tools are not required to use the release. Keep the extracted release folder in place.
 
