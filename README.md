@@ -2,6 +2,8 @@
 
 Minecraft Java 26.3 gameplay inside original Resident Evil 4 UHD, with Minecraft running automatically in the background.
 
+**THIS IS VIBE-CODED**
+
 The mod sends Minecraft's actual player meshes, textures, hands, HUD and inventory to RE4. Minecraft supplies movement, physics, blocks and combat; RE4 supplies terrain, native enemies and campaign scripts. Useful item drops progress with the campaign. The bridge preserves AZERTY controls and uses **X** for inventory.
 
 **Experimental release: 0.2.0-alpha.2.** The packaged background client, save/shutdown and inventory reload passed their runtime checks. The latest crate corrections still need a combined RE4 gameplay check. See [validation details](docs/RELEASE_VALIDATION.md).
