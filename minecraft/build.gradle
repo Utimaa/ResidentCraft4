@@ -1,0 +1,59 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+loom {
+    splitEnvironmentSourceSets()
+    mods { re4craft { sourceSet sourceSets.main; sourceSet sourceSets.client } }
+    runs { client {
+        runDir project.findProperty('re4craftGameDir') ?: '../.dev-instance'
+        programArgs '--username', 'Steve'
+        vmArgs '--enable-native-access=ALL-UNNAMED'
+        if (project.hasProperty('re4craftBackground')) vmArgs '-Dre4craft.background=true'
+        if (project.hasProperty('re4craftWorldName')) {
+            def worldName=project.property('re4craftWorldName').toString()
+            if (!(worldName ==~ /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/))throw new GradleException('Invalid isolated world name')
+            vmArgs "-Dre4craft.worldName=${worldName}"
+        }
+        if (project.hasProperty('re4craftTestWorld')) {
+            vmArgs '-Dre4craft.testWorld=true', '-Dre4craft.testExitSeconds=180'
+        }
+        if (project.hasProperty('re4craftSandbox')) {
+            vmArgs '-Dre4craft.testWorld=true', '-Dre4craft.testExitSeconds=0', '-Dre4craft.voidMirror=true'
+            vmArgs '-Dre4craft.grantStarterBow=true'
+        }
+        if (project.hasProperty('re4craftSceneTest')) {
+            vmArgs '-Dre4craft.port=18045', '-Dre4craft.sceneTest=true', '-Dre4craft.testWorld=true', '-Dre4craft.testExitSeconds=120'
+        }
+        if (project.hasProperty('re4craftVoidTest')) {
+            vmArgs '-Dre4craft.port=18046', '-Dre4craft.voidMirror=true', '-Dre4craft.testWorld=true', '-Dre4craft.testExitSeconds=240'
+            if(project.hasProperty('re4craftPhysicsTest'))vmArgs '-Dre4craft.physicsTest=true'
+            if(project.hasProperty('re4craftMobTest'))vmArgs '-Dre4craft.mobTest=true'
+            if(project.hasProperty('re4craftHazardTest'))vmArgs '-Dre4craft.hazardTest=true'
+            if(project.hasProperty('re4craftTntSlopeTest'))vmArgs '-Dre4craft.tntSlopeTest=true'
+            if(project.hasProperty('re4craftFluidTest'))vmArgs '-Dre4craft.fluidTest=true'
+            if(project.hasProperty('re4craftEffectsTest'))vmArgs '-Dre4craft.effectsTest=true'
+            if(project.hasProperty('re4craftLootTest'))vmArgs '-Dre4craft.lootTest=true'
+            if(project.hasProperty('re4craftShieldTest'))vmArgs '-Dre4craft.shieldTest=true'
+            if(project.hasProperty('re4craftMobNavigationTest'))vmArgs '-Dre4craft.mobNavigationTest=true'
+            if(project.hasProperty('re4craftRangeTest'))vmArgs '-Dre4craft.rangeTest=true'
+            if(project.hasProperty('re4craftProfile'))vmArgs '-Dre4craft.profile=true'
+            if(project.hasProperty('re4craftFocusTest'))vmArgs '-Dre4craft.testExitSeconds=75'
+        }
+    } }
+}
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+test { useJUnitPlatform() }
+tasks.withType(ProcessResources).configureEach {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') { expand version: project.version }
+}
+tasks.withType(JavaCompile).configureEach { options.release = 25 }
+java { sourceCompatibility = JavaVersion.VERSION_25; targetCompatibility = JavaVersion.VERSION_25; withSourcesJar() }
+jar { from('LICENSE-SkyCraft') }

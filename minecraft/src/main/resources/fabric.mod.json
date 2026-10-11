@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "re4craft",
+  "version": "${version}",
+  "name": "RE4Craft Minecraft Bridge",
+  "description": "Minecraft 26.3 runtime bridge for Resident Evil 4.",
+  "environment": "client",
+  "entrypoints": {"main": ["dev.re4craft.client.Re4CraftInit"], "client": ["dev.re4craft.client.Re4CraftClient"]},
+  "mixins": ["re4craft.client.mixins.json"],
+  "depends": {"fabricloader": ">=0.19.5", "minecraft": "26.3", "java": ">=25", "fabric-api": "*"}
+}

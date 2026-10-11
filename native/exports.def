@@ -1,0 +1,4 @@
+LIBRARY RE4Craft
+EXPORTS
+    RE4CraftProtocolSelfTest
+    RE4CraftTransportSelfTest
