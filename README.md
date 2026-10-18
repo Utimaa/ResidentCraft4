@@ -2,6 +2,8 @@
 
 Minecraft Java 26.3 gameplay inside original Resident Evil 4 UHD, with Minecraft running automatically in the background.
 
+**THIS IS VIBE-CODED, AND IS STILL IN A VERY EARLY STAGE, ALL OF THE INSTRUCTIONS BELOW ARE PROVIDED BY GPT, WITH ONLY SOME MODIFICATIONS BY ME.**
+
 The mod sends Minecraft's actual player meshes, textures, hands, HUD and inventory to RE4. Minecraft supplies movement, physics, blocks and combat; RE4 supplies terrain, native enemies and campaign scripts. Useful item drops progress with the campaign. The bridge preserves AZERTY controls and uses **X** for inventory.
 
 **Experimental release: 0.2.0-alpha.3.** This update adds Prism installation selection, fixes Windows launch-path encoding, and improves native boss/mine interactions, moving platforms, block-entity rendering and scripted landings. Source and component checks pass; the new engine scenes and combined RE4 campaign behavior still need verification. Intermittent native JVM crashes remain unresolved. See [validation details](docs/RELEASE_VALIDATION.md).
@@ -15,6 +17,8 @@ Requirements: Windows, original **Resident Evil 4 UHD** on Steam, and owned **Mi
 3. Run **Play.cmd**, load your RE4 campaign save and press **F8**.
 
 Minecraft starts with a hidden window and keeps running as a real background game process. The release reads your locally installed game files and uses a separate private world. Your original mods, worlds and account files are preserved. Prism users can select their launcher data root or 26.3 instance; RE4 and Minecraft may be on different drives. See [installation selection and startup logs](docs/LAUNCHER.md). If your Java runtime is older than 25.0.4, Setup downloads a checksum-verified portable Temurin runtime into the release folder; it does not replace your system Java.
+
+Press F8 for steve mod
 
 See the [simple install guide](INSTALL.md) for controls, uninstall and troubleshooting. Java/Fabric build tools are not required to use the release. Keep the extracted release folder in place.
 
@@ -63,4 +67,4 @@ For a verified release build, prepare official cached Fabric launch dependencies
 
 Inspired by [SkyCraft v0.1.0](https://github.com/chasmlol/SkyCraft/tree/v0.1.0); the adapted Minecraft exporter retains its MIT notice. Native research references [re4_tweaks](https://github.com/nipkownix/re4_tweaks). The bridge uses Fabric, MinHook and Ultimate ASI Loader. Complete notices are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and `licenses/`.
 
-AI-assisted development used OpenAI Codex and Universal Modder playbooks. Mod code is MIT licensed, with separately attributed third-party code under its original licenses. Minecraft and Resident Evil 4 game files belong to their respective owners and are not included. This is an unofficial project.
+** AI-assisted development used OpenAI Codex and Universal Modder playbooks. Mod code is MIT licensed, with separately attributed third-party code under its original licenses. Minecraft and Resident Evil 4 game files belong to their respective owners and are not included. This is an unofficial project. **
