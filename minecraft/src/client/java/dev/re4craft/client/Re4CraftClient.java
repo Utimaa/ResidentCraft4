@@ -79,6 +79,7 @@ public final class Re4CraftClient implements ClientModInitializer {
         });
         ClientLifecycleEvents.CLIENT_STOPPING.register(mc->SERVER.close());
         ClientTickEvents.END_CLIENT_TICK.register(Re4CraftClient::updateGait);
+        ClientTickEvents.END_CLIENT_TICK.register(MovingSurfaceFixture::tick);
         ServerTickEvents.START_SERVER_TICK.register(server->{
             UUID id=hostPlayerId;
             var p=id==null?null:server.getPlayerList().getPlayer(id);
@@ -255,6 +256,7 @@ public final class Re4CraftClient implements ClientModInitializer {
             anchor=null;snapped=false;guestRequested=false;guestReady=false;holdReason=null;restoreHostPlayer();HostCollision.reset();
         }
         byte[] collision=SERVER.pollCollision();if(collision!=null)HostCollision.accept(collision);
+        byte[] moving=SERVER.pollMovingSurfaces();if(moving!=null)HostCollision.acceptMoving(moving);
         active=latest!=null && latest.active() && SERVER.connected() && System.nanoTime()-lastInputNanos<750_000_000L;
         if(!active) {
             VirtualInput.releaseAll(mc);guestReady=false;clearTraversal();

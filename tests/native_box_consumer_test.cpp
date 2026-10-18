@@ -178,7 +178,7 @@ void fullControllerRoute(OriginalBox& original){
             check(field<int16_t>(actor.data(),0x324)==1000&&!healthCalls&&!dropCalls,"native crate with no active part was forced broken through HP fallback");
             guest.restore();continue;
         }
-        check(actor[0x32c]==1&&actor[0x32d]==10&&actor[0x32e]==(hitFlags==HitExplosion?18:16),"actual native setter failed to arm original crate reaction");
+        check(actor[0x32c]==1&&actor[0x32d]==10&&actor[0x32e]==(hitFlags==HitExplosion?18:hitFlags==HitProjectile?1:16),"actual native setter failed to arm original crate reaction");
         check(field<uint32_t>(actor.data(),0x340)==reinterpret_cast<uintptr_t>(actor.data()+0x344),"full controller fabricated rather than selected real active native damage part");
         check(!guest.damageLedger_.pending(7,18,GetTickCount64()),"crate acquired scaled creature damage ledger in full production controller");
         check(field<int16_t>(actor.data(),0x324)==1000&&!healthCalls&&!dropCalls,"scheduler directly changed crate HP or destruction state");

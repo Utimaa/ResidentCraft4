@@ -9,12 +9,12 @@ trap {
     Set-Content -LiteralPath $errorPath -Value $message -Encoding UTF8
     if($NoRE4){Write-Error $message;exit 1}
     Add-Type -AssemblyName System.Windows.Forms
-    [void][System.Windows.Forms.MessageBox]::Show($message + [Environment]::NewLine + 'See .re4craft/last-error.txt and .instance/logs/latest.log.','RE4Craft')
+    [void][System.Windows.Forms.MessageBox]::Show($message + [Environment]::NewLine + 'Launcher error record: ' + $errorPath,'RE4Craft')
     exit 1
 }
 $root = Get-ReleaseRoot
 $settings = Read-JsonFile (Assert-ChildPath $root '.re4craft/settings.json')
-if ($settings.SchemaVersion -ne 1 -or $settings.ReleaseVersion -ne '0.2.0-alpha.2') { throw 'Run Setup.cmd first.' }
+if ($settings.SchemaVersion -ne 1 -or $settings.ReleaseVersion -ne '0.2.0-alpha.3') { throw 'Run Setup.cmd first.' }
 $instance = Get-FullPath $settings.InstancePath
 if ([IO.Path]::GetFileName($instance) -notin @('.instance','.dev-instance')) { throw 'Invalid private instance.' }
 $hasher = [Security.Cryptography.SHA256]::Create()
@@ -28,7 +28,7 @@ $world = Assert-ChildPath $instance ('saves/' + $settings.WorldName + '/level.da
 if (-not (Test-Path -LiteralPath $world -PathType Leaf) -and -not $settings.AllowNewWorld) { throw 'The selected existing world is missing. Restore it before launching.' }
 Preserve-CreatedWorld $settings (Assert-ChildPath $root '.re4craft/settings.json')
 $payload = Read-ReleasePayload $root
-$owned = Resolve-OwnedMinecraft $settings.MinecraftPath $false
+$owned = Resolve-OwnedMinecraft $settings.MinecraftPath $false $root
 $settings.JavaPath = Resolve-Java25 $settings.MinecraftPath $settings.JavaPath
 if($settings.JavaPath.StartsWith((Assert-ChildPath $root '.re4craft/runtime')+'\',[StringComparison]::OrdinalIgnoreCase)){
     $verifiedJava=Read-PrivateRuntime $root
@@ -56,17 +56,25 @@ if (-not $source) {
     if (Test-Path -LiteralPath $shutdown -PathType Leaf) { Remove-Item -LiteralPath $shutdown }
     $settings | Add-Member -MemberType NoteProperty -Name ShutdownToken -Value ([Guid]::NewGuid().ToString('N')) -Force
     $arguments = New-MinecraftArguments $owned $payload $settings
-    $argumentText = ($arguments | ForEach-Object { ConvertTo-JavaArgument $_ }) -join [Environment]::NewLine
-    [IO.File]::WriteAllText($argumentFile,$argumentText,[Text.UTF8Encoding]::new($false))
-    # javaw and Minecraft's own log do not depend on a console pipe owned by
-    # this launcher. Keep the actual process handle for its whole supervised life.
-    $process = Start-Process -FilePath $settings.JavaPath -ArgumentList ('"@' + $argumentFile + '"') -WorkingDirectory $instance -WindowStyle Hidden -PassThru
+    Write-JavaArgumentFile $argumentFile $arguments
+    $launchId = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8)
+    $logs = [pscustomobject]@{Stdout=(Assert-ChildPath $instance ('.re4craft/java-' + $launchId + '.stdout.log'));Stderr=(Assert-ChildPath $instance ('.re4craft/java-' + $launchId + '.stderr.log'))}
+    Write-ReleaseJson ([pscustomobject]@{SchemaVersion=1;StartedUtc=[DateTime]::UtcNow.ToString('o');JavaPath=(Join-Path ([IO.Path]::GetDirectoryName($settings.JavaPath)) 'java.exe');InstancePath=$instance;MinecraftRoot=$owned.Root;SourceLayout=$owned.Layout;ArgumentCodePage=(Get-JavaArgumentEncoding).CodePage;Stdout=$logs.Stdout;Stderr=$logs.Stderr}) (Assert-ChildPath $instance '.re4craft/last-launch.json')
+    try { $process = Start-BackgroundJava $settings.JavaPath $argumentFile $instance $logs.Stdout $logs.Stderr }
+    catch { throw ('Unable to start background Java: ' + $_.Exception.Message + [Environment]::NewLine + 'Java stderr: ' + $logs.Stderr + [Environment]::NewLine + 'Java stdout: ' + $logs.Stdout) }
     Start-Sleep -Milliseconds 500
+    if ($process.HasExited) { throw (Get-MinecraftExitMessage $process $instance $logs) }
     $source = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $process.Id)
-    if (-not $source -or $source.ExecutablePath -ne $settings.JavaPath) { throw 'The Minecraft background client did not start. See the private instance logs/latest.log.' }
-    $receipt = [pscustomobject]@{SchemaVersion=1;ProcessId=$source.ProcessId;CreatedUtc=$source.CreationDate.ToUniversalTime().ToString('o');JavaPath=$settings.JavaPath;InstancePath=$instance;ArgumentFile=$argumentFile;ShutdownToken=$settings.ShutdownToken}
+    if (-not $source -or $source.ExecutablePath -ne (Join-Path ([IO.Path]::GetDirectoryName($settings.JavaPath)) 'java.exe')) {
+        if ($process.HasExited) { throw (Get-MinecraftExitMessage $process $instance $logs) }
+        throw ('The Minecraft background process could not be verified. Java stderr: ' + $logs.Stderr)
+    }
+    $receipt = [pscustomobject]@{SchemaVersion=1;ProcessId=$source.ProcessId;CreatedUtc=$source.CreationDate.ToUniversalTime().ToString('o');JavaPath=$source.ExecutablePath;InstancePath=$instance;ArgumentFile=$argumentFile;ShutdownToken=$settings.ShutdownToken;Stdout=$logs.Stdout;Stderr=$logs.Stderr}
     Write-ReleaseJson $receipt $receiptPath
-} else { $receipt = Read-JsonFile $receiptPath; $process = [Diagnostics.Process]::GetProcessById([int]$receipt.ProcessId) }
+} else {
+    $receipt = Read-JsonFile $receiptPath; $process = [Diagnostics.Process]::GetProcessById([int]$receipt.ProcessId)
+    $logs = if ($receipt.PSObject.Properties['Stderr'] -and $receipt.PSObject.Properties['Stdout']) { $receipt } else { $null }
+}
 $retainedHandle = $process.Handle
 if (-not (Get-OwnedSourceProcess $receipt $settings)) { throw 'The Minecraft process changed during startup. No other process was managed.' }
 if (-not $NoRE4) {
@@ -78,14 +86,14 @@ Write-Host 'Minecraft is starting in the background. Once its world loads, load 
 if ($NoMonitor) { return }
 if ($NoRE4) {
     $process.WaitForExit()
-    if($process.ExitCode -ne 0){throw ('Background Minecraft exited with code '+$process.ExitCode+'. See logs/latest.log or Windows Application Error events.')}
+    if($process.ExitCode -ne 0){throw (Get-MinecraftExitMessage $process $instance $logs)}
     Preserve-CreatedWorld $settings (Assert-ChildPath $root '.re4craft/settings.json')
     return
 }
 $executable = Get-FullPath (Join-Path $settings.GamePath 'Bin32/bio4.exe')
 $game = $null; $deadline = [DateTime]::UtcNow.AddSeconds(120)
 while (-not $game -and [DateTime]::UtcNow -lt $deadline) {
-    if ($process.HasExited) { throw ('Minecraft stopped during startup (exit code ' + $process.ExitCode + '). See its logs/latest.log.') }
+    if ($process.HasExited) { throw (Get-MinecraftExitMessage $process $instance $logs) }
     $game = @(Get-CimInstance Win32_Process -Filter "Name='bio4.exe'" | Where-Object { $_.ExecutablePath -and (Get-FullPath $_.ExecutablePath) -eq $executable }) | Select-Object -First 1
     Start-Sleep -Milliseconds 500
 }
@@ -96,7 +104,7 @@ if ($game) {
         if (-not $current -or $current.ExecutablePath -ne $executable -or $current.CreationDate -ne $gameCreated) { break }
         if ($process.HasExited) {
             Preserve-CreatedWorld $settings (Assert-ChildPath $root '.re4craft/settings.json')
-            if ($process.ExitCode -ne 0) { throw ('Minecraft stopped unexpectedly (exit code ' + $process.ExitCode + '). Run Play.cmd to restart it. See the private instance logs/latest.log or Windows Application Error events.') }
+            if ($process.ExitCode -ne 0) { throw (Get-MinecraftExitMessage $process $instance $logs) }
             return
         }
         Start-Sleep -Seconds 2

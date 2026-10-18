@@ -15,6 +15,7 @@ namespace re4craft { namespace {
 using Schedule=void(__fastcall*)(void*,void*);
 using ModelFn=void(__fastcall*)(void*,void*);
 using LifeDown=int(__cdecl*)(void*,int,int,uint32_t);
+using WeaponPower=int(__cdecl*)(void*,uint32_t,int);
 using EnemyAttack=void(__cdecl*)(void*,void*,void*,void*);
 using PlayerAttackHit=int(__cdecl*)(void*,void*,void*);
 using DamageSet=void(__fastcall*)(void*,void*,uint32_t,uint32_t,uint32_t,const Vec3*,float,void*);
@@ -31,6 +32,7 @@ thread_local CrateLootScope crateLootScope;
 Schedule originalSchedule{};ModelFn originalPlayerMove{},originalMatrix{};
 AtariAdjust originalAtari{},originalAtariSpecial{};
 LifeDown originalLife{};EnemyAttack originalAttack{};GuestController* controller{};
+WeaponPower originalWeaponPower{};
 NativeHostility hostileClasses;
 PlayerAttackHit originalPlayerAttackHit{};uintptr_t guardedHitReturn{};
 DamageSet originalDamageSet{};uintptr_t guardedDamageSetReturn{};
@@ -85,7 +87,7 @@ struct Manager {uint32_t vtable,array,count,stride;};
 bool readManager(uintptr_t address,Manager& m){return hookdetail::copy(address,&m,sizeof(m))&&m.count>0&&m.count<=512&&m.stride>=0x408&&m.stride<=0x10000&&m.array>=0x10000&&m.count<=((UINT32_MAX-m.array)/m.stride);}
 bool member(uintptr_t manager,uintptr_t model){Manager m{};return readManager(manager,m)&&model>=m.array&&(model-m.array)%m.stride==0&&(model-m.array)/m.stride<m.count;}
 struct ShapeRecord {uintptr_t address{};NativeActorBounds bounds{};uint16_t flags{};};
-struct EnemyData {uintptr_t address{},vtable{};uint32_t flags{},guid{},parts{};uint8_t kind{},subtype{},partCount{},damageFlags{},damageTimer{};uint16_t atariFlags{};int16_t hp{},maxHp{};Vec3 position{},old{},offset{};float yaw{},radius{},height{},matrix[3][4]{};NativeHitShape firstShape{};NativeActorBounds bounds{},crateBodyBounds{};std::array<ShapeRecord,32> shapes{};size_t shapeCount{};};
+struct EnemyData {uintptr_t address{},vtable{};uint32_t flags{},guid{},parts{},routine{};uint8_t kind{},subtype{},partCount{},damageFlags{},damageTimer{};uint16_t atariFlags{};int16_t hp{},maxHp{};Vec3 position{},old{},offset{};float yaw{},radius{},height{},matrix[3][4]{};NativeHitShape firstShape{};NativeActorBounds bounds{},crateBodyBounds{};std::array<ShapeRecord,32> shapes{};size_t shapeCount{};bool scriptedTrap{};};
 template<class T> void actorField(const uint8_t* bytes,size_t offset,T& out){std::memcpy(&out,bytes+offset,sizeof(out));}
 uintptr_t shapePart(const EnemyData& e,int number){
     if(number==0)return e.address;
@@ -98,6 +100,7 @@ uintptr_t shapePart(const EnemyData& e,int number){
     return at;
 }
 void readHitBounds(EnemyData& e){
+    e.bounds={};e.shapeCount=0;
     NativeHitShape shape=e.firstShape;uintptr_t at=e.address+0x344;
     std::array<uintptr_t,64> visited{};size_t count{};
     struct PartMatrix {int part;float matrix[3][4];};std::array<PartMatrix,32> matrices{};size_t matrixCount{};
@@ -130,7 +133,7 @@ void mergeBounds(NativeActorBounds& target,const NativeActorBounds& value){
     for(int a=0;a<3;++a){axis(target.minimum,a,std::min(axis(target.minimum,a),axis(value.minimum,a)));axis(target.maximum,a,std::max(axis(target.maximum,a),axis(value.maximum,a)));}
 }
 void readCrateBodyBounds(EnemyData& e){
-    if(!nativeBreakableKind(e.kind)||e.subtype<1||e.subtype>7)return;
+    if(e.kind!=0x53||e.subtype<1||e.subtype>7)return;
     // Retail SetBox stores all seven variants' actual model extents here.
     // Its local-space body check (5C2F50) uses X/Z +/-these full extents,
     // while the weapon parts (5C2AD0) deliberately use half-sized X/Z.
@@ -166,30 +169,35 @@ void readCrateBodyBounds(EnemyData& e){
         if(valid&&hookdetail::copy(at,check.data(),check.size())&&bytes==check)mergeBounds(e.crateBodyBounds,body);
     }
 }
-bool readEnemy(uintptr_t p,EnemyData& e,bool hitBounds=false){
+bool readEnemy(uintptr_t p,EnemyData& e,bool hitBounds=false,bool minecraft=false){
     // One validated cEm prefix replaces eleven per-field VirtualQuery calls.
     // The exact GUID/HP are still freshly copied before every native write.
     std::array<uint8_t,0x378> bytes{};if(!hookdetail::copy(p,bytes.data(),bytes.size()))return false;
     e.address=p;actorField(bytes.data(),0,e.vtable);actorField(bytes.data(),4,e.flags);actorField(bytes.data(),0x100,e.kind);actorField(bytes.data(),0x101,e.subtype);
-    if(!alive(e.flags)||(!nativeEnemyKind(e.kind)&&!nativeBreakableKind(e.kind)))return false;
+    e.scriptedTrap=minecraft&&nativeExplosiveTrap(e.kind,e.subtype);
+    if(!alive(e.flags)||(!nativeEnemyKind(e.kind)&&!nativeBreakableKind(e.kind)&&!e.scriptedTrap))return false;
     actorField(bytes.data(),0xf8,e.guid);actorField(bytes.data(),0x94,e.position);actorField(bytes.data(),0x110,e.old);actorField(bytes.data(),0xa4,e.yaw);
     actorField(bytes.data(),0x324,e.hp);actorField(bytes.data(),0x326,e.maxHp);actorField(bytes.data(),0x2b4,e.offset);actorField(bytes.data(),0x2c0,e.radius);actorField(bytes.data(),0x2c8,e.height);
     actorField(bytes.data(),0x2ce,e.atariFlags);
     actorField(bytes.data(),0x32c,e.damageFlags);actorField(bytes.data(),0x32d,e.damageTimer);
     actorField(bytes.data(),0xf4,e.parts);actorField(bytes.data(),0x102,e.partCount);actorField(bytes.data(),0xc,e.matrix);actorField(bytes.data(),0x344,e.firstShape);
-    if(!(e.guid<INT32_MAX&&e.hp>0&&e.maxHp>=e.hp&&finite(e.position)&&finite(e.old)&&finite(e.offset)&&std::isfinite(e.yaw)))return false;
+    actorField(bytes.data(),0xfc,e.routine);
+    if(!(e.guid<INT32_MAX&&e.hp>=0&&e.maxHp>=e.hp&&finite(e.position)&&finite(e.old)&&finite(e.offset)&&std::isfinite(e.yaw)))return false;
+    if(!e.scriptedTrap&&e.hp==0)return false;
+    if(e.scriptedTrap&&(e.routine&0xffff)==0x701)return false; // original detonation already owns this mine
     bool atari=std::isfinite(e.radius)&&std::isfinite(e.height)&&e.radius>0&&e.radius<=16000&&e.height>0&&e.height<=32000;
-    if(!atari&&!nativeBreakableKind(e.kind))return false;
-    if(hitBounds||(!atari&&nativeBreakableKind(e.kind)))readHitBounds(e);
+    if(!atari&&!nativeBreakableKind(e.kind)&&!minecraft)return false;
+    if(hitBounds||!atari||e.scriptedTrap)readHitBounds(e);
+    if(e.scriptedTrap&&!e.bounds.valid)return false;
     // Boxes with no live native hit shape and no native movement bounds are
     // omitted rather than fabricating dimensions or making scripted props hittable.
     return atari||e.bounds.valid;
 }
-uintptr_t nearestHitShape(const EnemyData& e,Vec3 source,bool protectedWeaponRejected){
+uintptr_t nearestHitShape(const EnemyData& e,Vec3 source,bool protectedWeaponRejected,float reach=std::numeric_limits<float>::infinity()){
     uintptr_t selected{};float nearest=std::numeric_limits<float>::infinity();
     for(size_t i=0;i<e.shapeCount;++i){const auto& shape=e.shapes[i];if(!nativeHitPartAcceptsWeapon(shape.flags,protectedWeaponRejected))continue;float distance{};
         for(int a=0;a<3;++a){float relative=axis(source,a)-axis(e.position,a),d=std::clamp(relative,axis(shape.bounds.minimum,a),axis(shape.bounds.maximum,a))-relative;distance+=d*d;}
-        if(distance<nearest){nearest=distance;selected=shape.address;}
+        if(distance<=reach*reach&&distance<nearest){nearest=distance;selected=shape.address;}
     }
     return selected;
 }
@@ -198,9 +206,9 @@ bool damageIdentity(uintptr_t model,NativeDamageIdentity& info){
     return hookdetail::copy(model+0x330,&info.source,12)&&hookdetail::copy(model+0x340,&info.yarare,4)&&finite(info.source);
 }
 Enemy packet(const EnemyData& e,float units,bool minecraftCrateBody=false){
-    const bool hostile=!nativeBreakableKind(e.kind)&&!hostileClasses.merchantActor(e.vtable)
+    const bool hostile=!nativeBreakableKind(e.kind)&&!e.scriptedTrap&&!hostileClasses.merchantActor(e.vtable)
         &&(knownNativeHostileKind(e.kind)||hostileClasses.commonGanadoActor(e.kind,e.vtable));
-    Enemy p{};p.id=e.guid+1;p.flags=ActorAlive|(nativeBreakableKind(e.kind)?ActorBreakable:0U)|(hostile?ActorHostile:0U);p.x=e.position.x/units;p.y=e.position.y/units;p.z=e.position.z/units;
+    Enemy p{};p.id=e.guid+1;p.flags=ActorAlive|((nativeBreakableKind(e.kind)||e.scriptedTrap)?ActorBreakable:0U)|(hostile?ActorHostile:0U);p.x=e.position.x/units;p.y=e.position.y/units;p.z=e.position.z/units;
     p.minX=(e.offset.x-e.radius)/units;p.maxX=(e.offset.x+e.radius)/units;p.minY=e.offset.y/units;p.maxY=(e.offset.y+e.height)/units;p.minZ=(e.offset.z-e.radius)/units;p.maxZ=(e.offset.z+e.radius)/units;
     if(e.bounds.valid){
         // A wooden crate's narrow weapon-test part can sit inside its native
@@ -222,7 +230,10 @@ Enemy packet(const EnemyData& e,float units,bool minecraftCrateBody=false){
         p.minX=std::min(p.minX,e.crateBodyBounds.minimum.x/units);p.minY=std::min(p.minY,e.crateBodyBounds.minimum.y/units);p.minZ=std::min(p.minZ,e.crateBodyBounds.minimum.z/units);
         p.maxX=std::max(p.maxX,e.crateBodyBounds.maximum.x/units);p.maxY=std::max(p.maxY,e.crateBodyBounds.maximum.y/units);p.maxZ=std::max(p.maxZ,e.crateBodyBounds.maximum.z/units);
     }
-    p.health=e.hp/50.f;p.maxHealth=e.maxHp/50.f;p.yaw=-e.yaw/Radians;p.kind=e.kind;return p;
+    // A native mine is an armed scripted interaction, often HP0 even before
+    // detonation. These unit values keep only its invisible Minecraft attack
+    // proxy hittable; native HP/routine are never invented or rewritten.
+    p.health=e.scriptedTrap?1.f:e.hp/50.f;p.maxHealth=e.scriptedTrap?1.f:e.maxHp/50.f;p.yaw=-e.yaw/Radians;p.kind=e.kind;return p;
 }
 void __fastcall schedule(void* self,void* unused){if(controller)controller->beforeSchedule();originalSchedule(self,unused);if(controller)controller->afterSchedule();}
 void __fastcall playerMove(void* self,void* unused){if(controller)controller->beforePlayerMove(self);if(!controller||!controller->suppressPlayerMove())originalPlayerMove(self,unused);if(controller)controller->afterPlayerMove(self);}
@@ -238,6 +249,7 @@ int __fastcall atariAdjustSpecial(void* self,void* unused,void* actor,uint32_t f
     clipped=(controller&&controller->constrainEnemyAtari(actor))||clipped;return clipped?1:result;
 }
 int __cdecl lifeDown(void* model,int damage,int randomRange,uint32_t flags){return controller?controller->interceptLife(model,damage,randomRange,flags):originalLife(model,damage,randomRange,flags);}
+int __cdecl weaponPower(void* model,uint32_t weapon,int weakPoint){const int power=originalWeaponPower(model,weapon,weakPoint);return controller?controller->interceptWeaponPower(model,weapon,power):power;}
 void __cdecl enemyAttack(void* yarare,void* info,void* from,void* to){if(!controller||!controller->interceptEnemyAttack(yarare,info,from,to))originalAttack(yarare,info,from,to);}
 int __cdecl playerAttackHit(void* info,void* from,void* to){
     // Only EmAtkHitCk's verified call owns the direct HP=0 branch. Other
@@ -300,6 +312,9 @@ void setGuestDamageSetterFixture(uintptr_t address){originalDamageSet=reinterpre
 void setGuestCrateLootFixture(uintptr_t move,uintptr_t allocator,uintptr_t returnAddress,GuestController* owner){originalCrateMove=reinterpret_cast<ModelFn>(move);originalItemSet=reinterpret_cast<ItemSet>(allocator);crateDropReturn=returnAddress;controller=owner;}
 void runGuestCrateMoveFixture(void* actor){crateMove(actor,nullptr);}
 uintptr_t guestItemSetFixture(){return reinterpret_cast<uintptr_t>(itemSet);}
+bool sampleGuestActorFixture(uintptr_t address,bool minecraft,Enemy& output){EnemyData actor{};if(!readEnemy(address,actor,true,minecraft))return false;if(minecraft)readCrateBodyBounds(actor);output=packet(actor,1000.f,minecraft);return validEnemyRecord(output);}
+void setGuestWeaponPowerFixture(uintptr_t original,GuestController* owner){originalWeaponPower=reinterpret_cast<WeaponPower>(original);controller=owner;}
+uintptr_t guestWeaponPowerFixture(){return reinterpret_cast<uintptr_t>(weaponPower);}
 #endif
 bool validGuestMotion(const GuestMotion& m,uint32_t epoch,bool vehicleMode){
     return validGuestMotion(m,epoch,vehicleMode?BridgeMode::BeamNG:BridgeMode::Minecraft);
@@ -487,6 +502,15 @@ bool GuestController::installHooks(GameAccess* game,LogFn log){
     size_t enabled{};for(;enabled<targets.size();++enabled)if(MH_EnableHook(reinterpret_cast<void*>(targets[enabled]))!=MH_OK)break;
     if(enabled<targets.size()){for(auto p:targets){MH_DisableHook(reinterpret_cast<void*>(p));MH_RemoveHook(reinterpret_cast<void*>(p));}controller=nullptr;return false;}
     installed_=true;matrixFunction_=matrix;meleeDispatcher_=dispatch;meleeCancel_=cancel;partWeaponFilter_=partFilter;collisionTranslate_=translate;vehicleSatManager_=vehicleSat;
+    // The original cdecl three-argument power lookup is shared by specialised
+    // actor consumers. Gigante, for example, applies it to an internal stagger
+    // gauge before its own parasite/HP phase; writing common HP cannot replace
+    // that state machine. Native callers retain their subsequent multipliers.
+    uintptr_t power=code.find("55 8B EC 56 8B 75 0C 57 83 FE 31 72 ? BE 02 00 00 00 8B 45 08 0F B6 80 00 01 00 00 83 C0 F0");
+    if(power&&MH_CreateHook(reinterpret_cast<void*>(power),reinterpret_cast<void*>(weaponPower),reinterpret_cast<void**>(&originalWeaponPower))==MH_OK){
+        if(MH_EnableHook(reinterpret_cast<void*>(power))!=MH_OK){MH_RemoveHook(reinterpret_cast<void*>(power));originalWeaponPower=nullptr;}
+    }
+    if(log)log(originalWeaponPower?"Native specialised enemy power route installed; original weak-point/phase consumers retained.":"Native specialised power signature unavailable; original native weapon power retained.");
     // Optional loot hooks fail open without disabling already verified combat.
     uintptr_t drop=code.find("55 8B EC 83 EC 18 A1 ? ? ? ? 33 C5 89 45 FC 56 8B 75 08 0F B7 8E DE 03 00 00 B8 FF FF 00 00");
     uintptr_t crate=code.find("83 66 04 FD 33 C0 66 89 86 24 03 00 00 8A 86 4C 06 00 00 53 57 3C FF");
@@ -722,7 +746,7 @@ int GuestController::interceptLife(void* model,int damage,int randomRange,uint32
             // ObjItemBox's real consumer supplies fixed 1000/9999 damage for a
             // valid weapon hit. Scaling that into Minecraft creature health
             // prevents its native one-hit destruction/drop/save routine.
-            if(physicsActive&&!playerRetained&&member(enemyManager_,address)&&readEnemy(address,enemy)&&!nativeBreakableKind(enemy.kind)&&damageIdentity(address,info)){
+            if(physicsActive&&!playerRetained&&member(enemyManager_,address)&&readEnemy(address,enemy,false,minecraftGameplayRoutes(guestMode_))&&!nativeBreakableKind(enemy.kind)&&!enemy.scriptedTrap&&damageIdentity(address,info)){
                 int selectedDamage{};
                 auto claim=damageLedger_.consume(epoch_,enemy.guid+1,address,info,GetTickCount64(),selectedDamage);
                 if(claim==DamageClaim::AlreadyApplied){repeatRetained=true;retainedHp=enemy.hp;}
@@ -744,6 +768,34 @@ int GuestController::interceptLife(void* model,int damage,int randomRange,uint32
     }
     return result;
 }
+int GuestController::interceptWeaponPower(void* model,uint32_t weapon,int nativePower){
+    // Zero is an original weapon/body/phase immunity, not an invitation to
+    // force Minecraft damage. Native callers still own effects and transitions.
+    if(nativePower<=0||!game_)return nativePower;
+    const auto state=game_->protectionState();
+    std::lock_guard lock(mutex_);
+    if(!minecraftGameplayRoutes(guestMode_)||!activeLocked(state))return nativePower;
+    const auto address=reinterpret_cast<uintptr_t>(model);EnemyData actor{};NativeDamageIdentity identity{};
+    if(!member(enemyManager_,address)||!readEnemy(address,actor,false,true)
+       ||nativeGanadoKind(actor.kind)||nativeBreakableKind(actor.kind)||actor.scriptedTrap
+       ||!damageIdentity(address,identity)||identity.weapon!=weapon)return nativePower;
+    int selected{};const auto claim=damageLedger_.consume(epoch_,actor.guid+1,address,identity,GetTickCount64(),selected,DamageConsumer::WeaponPower);
+    // One original consumer can query the same power for both its stagger
+    // meter and actual HP. Supply its same owned value without performing a
+    // health write or suppressing its later original LifeDown call.
+    if(claim==DamageClaim::Unrelated)return nativePower;
+    // Retail Gigante's exposed parasite consumer doubles this value and
+    // subtracts its low word directly from signed16 HP (4B0ADC..4B0AE3),
+    // without LifeDown's clamp. Keep that exact native write in range even
+    // for a high-fall Minecraft mace strike. Its subtypes1/3 divide power
+    // by4+1 first, so the existing32767 input bound is already safe there.
+    // Other bosses retain their own multipliers and original LifeDown clamp.
+    if(actor.kind==0x2b&&actor.subtype!=1&&actor.subtype!=3){
+        uint16_t part{};if(!hookdetail::copy(uintptr_t(identity.yarare)+0x26,&part,sizeof(part)))return nativePower;
+        if(part==0x3f)selected=std::min(selected,int(INT16_MAX)/2);
+    }
+    return selected;
+}
 bool GuestController::interceptEnemyAttack(void*,void* info,void* from,void* to){
     auto s=game_?game_->sample():NativeSnapshot{};
     if(leonProtected(s))return true; // verified EmAtkSetDamagePL/direct-zero caller: player only
@@ -758,7 +810,7 @@ bool GuestController::interceptEnemyAttack(void*,void* info,void* from,void* to)
 void GuestController::refreshEnemiesLocked(const NativeSnapshot& s){
     uint64_t now=GetTickCount64();if(!nativeEnemyRefreshDue(lastEnemyTime_,now))return;lastEnemyTime_=now;
     enemies_.clear();enemyAddresses_.clear();Manager m{};if(!activeLocked(s)||!readManager(enemyManager_,m))return;
-    for(uint32_t i=0;i<m.count&&enemies_.size()<256;++i){EnemyData e{};if(!readEnemy(m.array+i*m.stride,e))continue;float x=(e.position.x-s.position.x)/units_,y=(e.position.y-s.position.y)/units_,z=(e.position.z-s.position.z)/units_;if(x*x+y*y+z*z>128*128)continue;readHitBounds(e);if(minecraftGameplayRoutes(guestMode_))readCrateBodyBounds(e);if(appendUniqueEnemy(enemies_,packet(e,units_,minecraftGameplayRoutes(guestMode_))))enemyAddresses_.push_back({e.guid+1,e.address});}
+    for(uint32_t i=0;i<m.count&&enemies_.size()<256;++i){EnemyData e{};if(!readEnemy(m.array+i*m.stride,e,false,minecraftGameplayRoutes(guestMode_)))continue;float x=(e.position.x-s.position.x)/units_,y=(e.position.y-s.position.y)/units_,z=(e.position.z-s.position.z)/units_;if(x*x+y*y+z*z>128*128)continue;readHitBounds(e);if(minecraftGameplayRoutes(guestMode_))readCrateBodyBounds(e);if(appendUniqueEnemy(enemies_,packet(e,units_,minecraftGameplayRoutes(guestMode_))))enemyAddresses_.push_back({e.guid+1,e.address});}
 }
 bool GuestController::shoveVehicleContact(const GuestMelee& attack,const GuestMotion& impactMotion,uintptr_t address,const NativeSnapshot& s){
     float units{};GuestMotion motion{};
@@ -822,11 +874,11 @@ void GuestController::beforeSchedule(){
         // Cached packets find the allocation only. Membership, exact GUID,
         // live flags, HP and animated shape are freshly read before each call.
         if(address<m.array||(address-m.array)%m.stride||(address-m.array)/m.stride>=m.count)continue;
-        EnemyData e{};if(!readEnemy(address,e,true)||e.guid+1!=attack.targetId)continue;if(minecraftGameplayRoutes(scheduledMode))readCrateBodyBounds(e);Enemy current=packet(e,units,minecraftGameplayRoutes(scheduledMode));if((vehicle?(!vehicleImpactGeometryInReach(attack,current,vehicleMotion)||!vehicleImpactInReach(attack,current,queued.impactMotion)):!meleeInReach(attack,current,feet))||(nativeBreakableKind(e.kind)&&!nativeBreakableAttack(attack.flags)))continue;
+        EnemyData e{};if(!readEnemy(address,e,true,minecraftGameplayRoutes(scheduledMode))||e.guid+1!=attack.targetId)continue;if(minecraftGameplayRoutes(scheduledMode))readCrateBodyBounds(e);Enemy current=packet(e,units,minecraftGameplayRoutes(scheduledMode));const bool nativeObject=nativeBreakableKind(e.kind)||e.scriptedTrap;if((vehicle?(!vehicleImpactGeometryInReach(attack,current,vehicleMotion)||!vehicleImpactInReach(attack,current,queued.impactMotion)):!meleeInReach(attack,current,feet))||(nativeObject&&!nativeBreakableAttack(attack.flags)))continue;
         if(minecraftGameplayRoutes(scheduledMode)&&guestAttackUsesBlockRay(attack.flags)&&blockedByGuestBlocks({float(attack.attackX),float(attack.attackY),float(attack.attackZ)},{float(current.x+(current.minX+current.maxX)*.5),float(current.y+(current.minY+current.maxY)*.5),float(current.z+(current.minZ+current.maxZ)*.5)},boxes))continue;
         int amount=std::clamp(int(std::lround(attack.damage*50.f)),1,32767);
         bool nativeReaction=false,reactionArmed=false;
-        if((nativeGanadoKind(e.kind)||nativeBreakableKind(e.kind))&&originalDamageSet){
+        if((nativeGanadoKind(e.kind)||nativeObject||(minecraftGameplayRoutes(scheduledMode)&&nativeEnemyKind(e.kind)))&&originalDamageSet){
             bool pending{};{std::lock_guard lock(mutex_);pending=damageLedger_.pending(epoch_,attack.targetId,GetTickCount64());}
             if(pending||(e.damageFlags&1)||e.damageTimer){
                 // A native reaction already owns this damage-info record. Keep
@@ -841,7 +893,7 @@ void GuestController::beforeSchedule(){
             // comes from the actual impact and the one-time native ledger;
             // no radial explosion dispatcher or extra area hit is called.
             uint32_t weapon=vehicle&&vehicleKnockdownImpact(attack)?0x12U:guestNativeDamageWeaponForFlags(attack.flags);
-            if(!nativeBreakableKind(e.kind)&&(attack.flags&~(HitCritical|HitAlly))==0&&meleeDispatcher_&&length>.01f&&length<1.8f){
+            if(!nativeObject&&(attack.flags&~(HitCritical|HitAlly))==0&&meleeDispatcher_&&length>.01f&&length<1.8f){
                 float distance=attack.maxReach*units/length;
                 Vec3 to{from.x+attack.directionX*distance,from.y+attack.directionY*distance,from.z+attack.directionZ*distance};
                 auto previous=reactionScope;reactionScope={e.address,false};
@@ -852,7 +904,7 @@ void GuestController::beforeSchedule(){
             }
             if(!nativeReaction){
                 bool protectedWeaponRejected=partWeaponFilter_&&reinterpret_cast<int(__cdecl*)(uint32_t)>(partWeaponFilter_)(weapon)!=0;
-                uintptr_t shape=nearestHitShape(e,from,protectedWeaponRejected);NativeHitShape fresh{};
+                uintptr_t shape=nearestHitShape(e,from,protectedWeaponRejected,minecraftGameplayRoutes(scheduledMode)?attack.maxReach*units:std::numeric_limits<float>::infinity());NativeHitShape fresh{};
                 if(!shape&&e.shapeCount){char line[192]{};std::snprintf(line,sizeof(line),"Guest combat route: epoch=%u event=%u target=%u rawMC=%.3f result=native-protected-body-part-immune.",attack.epoch,attack.eventId,attack.targetId,double(attack.damage));combatLog(log_,line);continue;}
                 // The guest has already performed its actual hit/exposure test.
                 // Install a native pending hit on a real active native part;
@@ -867,9 +919,9 @@ void GuestController::beforeSchedule(){
             // A crate receives the verified pending shape hit, then its own
             // move consumer owns original damage, break effects and scripts.
             // It must not acquire the creature-damage override ledger.
-            if(nativeReaction&&!nativeBreakableKind(e.kind)){
+            if(nativeReaction&&!nativeObject){
                 bool identified=damageIdentity(e.address,info);
-                    bool armed{};{std::lock_guard lock(mutex_);armed=identified&&attack.epoch==epoch_&&scheduledMode==guestMode_&&activeLocked(s)&&damageLedger_.arm(epoch_,e.guid+1,attack.eventId,e.address,info,amount,GetTickCount64());
+                    bool armed{};{std::lock_guard lock(mutex_);const auto consumer=minecraftGameplayRoutes(scheduledMode)&&!nativeGanadoKind(e.kind)&&originalWeaponPower?DamageConsumer::WeaponPower:DamageConsumer::Life;armed=identified&&attack.epoch==epoch_&&scheduledMode==guestMode_&&activeLocked(s)&&damageLedger_.arm(epoch_,e.guid+1,attack.eventId,e.address,info,amount,GetTickCount64(),consumer);
                         if(armed&&log_){meleeDiagnostics_.erase(std::remove_if(meleeDiagnostics_.begin(),meleeDiagnostics_.end(),[&](const MeleeDiagnostic& d){return d.id==e.guid+1;}),meleeDiagnostics_.end());if(meleeDiagnostics_.size()>=64)meleeDiagnostics_.erase(meleeDiagnostics_.begin());meleeDiagnostics_.push_back({epoch_,attack.eventId,e.guid+1,e.address,attack.damage});}}
                     reactionArmed=armed;
                     if(!armed&&meleeCancel_){
@@ -879,14 +931,15 @@ void GuestController::beforeSchedule(){
                     }
             }
         }
-        // Actors with no verified common Ganado consumer or no readable active
-        // native body part keep the bounded generic health route.
-        // A box is never reduced through the generic HP route: its original
-        // consumer owns destruction, item drops and room script bookkeeping.
-        if(!nativeReaction&&!nativeBreakableKind(e.kind)){bool wanted{};{std::lock_guard lock(mutex_);wanted=attack.epoch==epoch_&&scheduledMode==guestMode_&&activeLocked(s)&&!(motion_.flags&MotionDead)&&motion_.health>0;}if(wanted)originalLife(reinterpret_cast<void*>(e.address),amount,0,0);}
+        // Minecraft hits must reach the actor's original damage consumer.
+        // Bosses use that pending part/weapon to enter their weak-point,
+        // stagger and phase/death routines. Direct HP subtraction bypasses
+        // those routines and can leave a boss invulnerable or stalled.
+        // Preserve the retained non-Minecraft vehicle route unchanged.
+        if(!nativeReaction&&!nativeObject&&!minecraftGameplayRoutes(scheduledMode)){bool wanted{};{std::lock_guard lock(mutex_);wanted=attack.epoch==epoch_&&scheduledMode==guestMode_&&activeLocked(s)&&!(motion_.flags&MotionDead)&&motion_.health>0;}if(wanted)originalLife(reinterpret_cast<void*>(e.address),amount,0,0);}
         bool shoved=vehicle&&shoveVehicleContact(attack,queued.impactMotion,e.address,s);
         int16_t afterHp=e.hp;hookdetail::copy(e.address+0x324,&afterHp,2);
-        char line[352]{};std::snprintf(line,sizeof(line),"Guest combat route: epoch=%u event=%u target=%u kind=%u rawMC=%.3f mappedNative=%d flags=%u HP=%d->%d vehicleShove=%u vehicleKnockdown=%u result=%s.",attack.epoch,attack.eventId,attack.targetId,unsigned(e.kind),double(attack.damage),amount,attack.flags,int(e.hp),int(afterHp),unsigned(shoved),unsigned(vehicle&&vehicleKnockdownImpact(attack)&&nativeReaction),nativeReaction?(nativeBreakableKind(e.kind)?"native-crate-original-damage-queued":reactionArmed?"native-reaction-armed":"native-reaction-selected-no-ledger"):nativeBreakableKind(e.kind)?"crate-no-native-part-skipped":"HP-fallback");combatLog(log_,line);
+        char line[352]{};std::snprintf(line,sizeof(line),"Guest combat route: epoch=%u event=%u target=%u kind=%u rawMC=%.3f mappedNative=%d flags=%u HP=%d->%d vehicleShove=%u vehicleKnockdown=%u result=%s.",attack.epoch,attack.eventId,attack.targetId,unsigned(e.kind),double(attack.damage),amount,attack.flags,int(e.hp),int(afterHp),unsigned(shoved),unsigned(vehicle&&vehicleKnockdownImpact(attack)&&nativeReaction),nativeReaction?(nativeObject?(e.scriptedTrap?"native-trap-original-damage-queued":"native-crate-original-damage-queued"):reactionArmed?"native-reaction-armed":"native-reaction-selected-no-ledger"):nativeObject?"object-no-native-part-skipped":minecraftGameplayRoutes(scheduledMode)?"native-consumer-no-hit":"HP-fallback");combatLog(log_,line);
     }
 }
 void GuestController::afterSchedule(){

@@ -1,15 +1,18 @@
-# RE4Craft 0.2.0-alpha.2
+# RE4Craft 0.2.0-alpha.3
 
-Minecraft 26.3 gameplay in original Resident Evil 4 UHD, with an automatically started background Minecraft client.
+Minecraft Java 26.3 gameplay inside original Resident Evil 4 UHD, using a real background Minecraft client. Download the **Windows ZIP**, extract it, run **Setup.cmd** with RE4 closed, then **Play.cmd**. Load a campaign save and press **F8**. Install and open owned Minecraft **26.3** once through the official Launcher or Prism Launcher before setup. Full steps are in [INSTALL.md](INSTALL.md).
 
-Download the **Windows ZIP**, extract it, and run **Setup.cmd**, then **Play.cmd**. Install Minecraft Java **26.3** in the official Launcher and open it once before setup. In RE4, load a campaign save and press **F8**. Full steps and controls are in **INSTALL.md** inside the ZIP.
+This update adds:
 
-This update extends crate targeting to the original larger collision meshes and adds campaign loot progression: wood, stone, iron, diamonds, then netherite upgrade and enchanting supplies in chapters 5 and 6. Collect and craft your equipment using actual Minecraft recipes; the loot includes smithing templates, enchanted books and experience for an enchanted netherite set by the end of the campaign. Existing inventory and armor are preserved. Ammo, food and building materials continue throughout.
+- **Prism support:** select its data root or 26.3 instance and reuse the existing shared client, libraries and assets. RE4 and Minecraft may be on different drives.
+- **Startup fixes and logs:** restore the JVM stack-shadow option specified by the pinned Minecraft 26.3 launch metadata, correct the Windows argument-file encoding for supported non-ASCII paths, reject incompatible paths clearly, and retain Java stdout/stderr and exit codes even before Minecraft creates its log.
+- **Native combat corrections:** send boss/special-enemy hits through original damage consumers while preserving weak points, phases and protection rules. Armed mines/tripwires retain their original damage and detonation logic.
+- **Moving platforms:** update actual RE4 collision transforms and carry grounded Minecraft riders through translation and rotation, releasing carry on jumps, lost support or stale data.
+- **Block entities:** export original models, textures and animations such as chests, heads, banners and moving blocks. Sign glyphs and specialized portal shader effects remain unsupported.
+- **Scripted landings:** retain native event placements and require the actual Minecraft server/client landing acknowledgement before restoring guest movement. Existing native-window handoff keeps priority.
 
-Background launch, native-window handoff and the starter bow remain. Actual Minecraft physics, animation, skin/armor, hands, HUD, inventory, blocks and combat remain supplied by Minecraft. AZERTY ZQSD movement and X inventory are retained. Install both parts of this update together using Setup.cmd.
+Campaign crafting/loot progression, existing worlds and inventories, AZERTY ZQSD movement and **X** inventory are preserved. Install both bridge components together through Setup.
 
-Requirements: Windows, owned Minecraft Java 26.3, and original Steam RE4 UHD x86, tested against 1.1.0. The source engine still uses CPU/GPU resources while running in the background. Game assets and saves are not included.
+**Experimental pre-release:** source/component checks and isolated Minecraft block-entity, moving-platform and landing-receipt scenes pass. Combined RE4 campaign behavior remains to be verified. The Windows encoding defect was reproduced and fixed, but the exact cause of the background-startup report in issue #2 is unproven. Intermittent native JVM access violations remain unresolved, including failures before a world opens. See [validation details](docs/RELEASE_VALIDATION.md) and [startup troubleshooting](docs/LAUNCHER.md). No sustained 60 FPS guarantee is made.
 
-**Experimental pre-release:** the final hidden client passed actual recipe, anvil-preview, saved-book, loot-rotation and XP terrain/pickup checks, followed by successful save/reload. All seven crate variants passed the native component fixtures. Larger-crate and window behavior still needs combined RE4 gameplay verification. One private startup attempt hit an unresolved JVM access violation before a successful retry and reload; see **docs/RELEASE_VALIDATION.md**. No sustained 60 FPS guarantee is made.
-
-Halo and BeamNG development are on hold; ULTRAKILL is cancelled. This package focuses on Minecraft. See **CHANGELOG.md** and **docs/RELEASE_VALIDATION.md** for details and current limits.
+Requirements: Windows, owned Minecraft Java 26.3 and original Steam RE4 UHD x86, tested against 1.1.0. Game assets, account files and saves are not included. Halo and BeamNG development remain on hold; ULTRAKILL is cancelled.

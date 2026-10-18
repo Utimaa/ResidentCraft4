@@ -5,23 +5,24 @@
 
 namespace re4craft {
 enum class WindowHandoffPhase : uint8_t { Idle, NativeAction, AwaitLanding, Failed };
-// Only the exact verified native window callback may begin this handoff.
-// A native displacement, routine flag, hit, grab or cutscene cannot begin it.
+// Receipt policy shared by the exact window callback and the separately scoped
+// STA_EVENT cycle observer. Neither caller infers an action from displacement.
 class NativeWindowHandoff {
 public:
     static constexpr uint64_t ActionLimitMs=30000,LandingLimitMs=2000;
     uint64_t begin(BridgeMode mode,bool guestRequested,const NativeTraversalState& native,
-                   uint32_t epoch,uint64_t now,float unitsPerBlock){
+                   uint32_t epoch,uint64_t now,float unitsPerBlock,uint64_t actionLimitMs=ActionLimitMs){
         if(mode!=BridgeMode::Minecraft||!guestRequested||phase_!=WindowHandoffPhase::Idle
-           ||!eligible(native)||!epoch||!std::isfinite(unitsPerBlock)||unitsPerBlock<=0)return 0;
+           ||!eligible(native)||!epoch||!std::isfinite(unitsPerBlock)||unitsPerBlock<=0
+           ||!actionLimitMs||actionLimitMs>180000)return 0;
         if(++serial_==0)++serial_;
-        token_=serial_;epoch_=epoch;identity_=native;started_=now;units_=unitsPerBlock;
+        token_=serial_;epoch_=epoch;identity_=native;started_=now;units_=unitsPerBlock;actionLimit_=actionLimitMs;
         phase_=WindowHandoffPhase::NativeAction;return token_;
     }
     bool complete(uint64_t token,bool originalSucceeded,const NativeTraversalState& native,
                   uint64_t sourceFrame,uint64_t now){
         if(!token||token!=token_||phase_!=WindowHandoffPhase::NativeAction)return false;
-        if(!originalSucceeded||!sameIdentity(native)||!within(started_,now,ActionLimitMs)){
+        if(!originalSucceeded||!sameIdentity(native)||!within(started_,now,actionLimit_)){
             phase_=WindowHandoffPhase::Failed;return false;
         }
         const double dx=double(native.position.x)-identity_.position.x;
@@ -33,7 +34,7 @@ public:
     }
     WindowHandoffPhase phase(const NativeTraversalState& native,uint32_t epoch,uint64_t now){
         if(phase_==WindowHandoffPhase::Idle||phase_==WindowHandoffPhase::Failed)return phase_;
-        const bool timed=phase_==WindowHandoffPhase::NativeAction?within(started_,now,ActionLimitMs):within(landingAt_,now,LandingLimitMs);
+        const bool timed=phase_==WindowHandoffPhase::NativeAction?within(started_,now,actionLimit_):within(landingAt_,now,LandingLimitMs);
         if(epoch!=epoch_||!sameIdentity(native)||!timed)phase_=WindowHandoffPhase::Failed;
         return phase_;
     }
@@ -67,6 +68,6 @@ private:
     WindowHandoffPhase phase_{WindowHandoffPhase::Idle};
     NativeTraversalState identity_{},landing_{};
     uint64_t serial_{},token_{},started_{},landingAt_{},sourceFrame_{};
-    uint32_t epoch_{};float units_{};
+    uint32_t epoch_{};float units_{};uint64_t actionLimit_{ActionLimitMs};
 };
 }

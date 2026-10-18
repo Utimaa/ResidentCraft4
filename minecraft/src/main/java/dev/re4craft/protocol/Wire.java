@@ -16,7 +16,7 @@ public final class Wire {
     public static final int MOTION_NATIVE_TRAVERSAL_ACK=32;
     public static final int MAX_PAYLOAD = 32 * 1024 * 1024;
     public static final int STATE = 1, TEXTURE = 2, MESH = 3, HUD = 4, MOTION = 5, MELEE = 6, BLOCKS = 7,
-            INPUT = 16, GOODBYE = 17, KEY_EVENT = 18, TEXT = 19, COLLISION = 20, ENEMIES = 21, DAMAGE = 22, LOOT = 23;
+            INPUT = 16, GOODBYE = 17, KEY_EVENT = 18, TEXT = 19, COLLISION = 20, ENEMIES = 21, DAMAGE = 22, LOOT = 23, MOVING_SURFACES = 24;
     public record Packet(int type, int sequence, byte[] payload) { }
     public record Input(int sequence, int flags, int held, int pressed, float yaw, float pitch,
                         int selectedSlot, int scroll, int hostEpoch, double hostX, double hostY, double hostZ,
@@ -67,11 +67,12 @@ public final class Wire {
         int type = Short.toUnsignedInt(h.getShort()), size = h.getInt(), sequence = h.getInt();
         if (magic != MAGIC || version != VERSION || size < 0 || size > MAX_PAYLOAD)
             throw new IOException("Invalid RE4Craft packet header");
-        if (type != INPUT && type != GOODBYE && type != KEY_EVENT && type != TEXT && type != COLLISION && type != ENEMIES && type != DAMAGE && type != LOOT)
+        if (type != INPUT && type != GOODBYE && type != KEY_EVENT && type != TEXT && type != COLLISION && type != MOVING_SURFACES && type != ENEMIES && type != DAMAGE && type != LOOT)
             throw new IOException("Unsupported host packet type " + type);
         if ((type == INPUT && size != 80) || (type == GOODBYE && size != 0)
                 || (type == KEY_EVENT && size != 16) || (type == TEXT && size > 4096)
-                || (type == COLLISION && (size < 32 || (size-32)%36 != 0))
+                || (type == COLLISION && (size < 32 || ((size-32)%36 != 0 && (size-32)%48 != 0)))
+                || (type == MOVING_SURFACES && (size < 24 || (size-24)%60 != 0 || size > 24+4096*60))
                 || (type == ENEMIES && (size < 16 || (size-16)%72 != 0 || size > 16+512*72))
                 || (type == DAMAGE && size != 48) || (type == LOOT && size != 48))
             throw new IOException("Invalid host payload length");

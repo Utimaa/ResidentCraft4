@@ -83,8 +83,8 @@ header+='namespace boxfixture { inline const uint8_t BrokenScriptCode[]={'+','.j
 header+=array('BrokenScriptCalls',script_calls)+array('BrokenScriptAbsolute',script_absolute)+'}\n'
 (build/'native-box-fixture-private.hpp').write_text(header)
 source=(ROOT/'native/guest_controller.cpp').read_text()
-assert 'readEnemy(address,enemy)&&!nativeBreakableKind(enemy.kind)&&damageIdentity' in source
-assert 'if(nativeReaction&&!nativeBreakableKind(e.kind))' in source
+assert 'readEnemy(address,enemy,false,minecraftGameplayRoutes(guestMode_))&&!nativeBreakableKind(enemy.kind)&&!enemy.scriptedTrap&&damageIdentity' in source
+assert 'if(nativeReaction&&!nativeObject)' in source
 proof={'exeSha256':sha,'kind':83,'upstream':'reference/re4_tweaks/dllmain/Game.cpp EmNames Box 0x53',
  'initialHPAndMax':1000,'subtypes':list(range(1,8)),'originalBodyExtents':profiles,
  'actualConstructor':'0x5c3230','originalMove':'0x5c40b0','originalConsumer':'0x5c3dd0','originalDestroy':'0x5c39d0',

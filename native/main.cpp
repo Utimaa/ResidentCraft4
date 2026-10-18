@@ -20,6 +20,7 @@
 #include "native_grab_hooks.hpp"
 #include "native_window_hooks.hpp"
 #include "native_window_handoff.hpp"
+#include "native_script_handoff.hpp"
 #include "vehicle_presentation.hpp"
 #include <atomic>
 #include <array>
@@ -76,6 +77,7 @@ LeonProtectionPolicy leonProtection;
 NativeGrabHooks nativeGrabs;
 NativeWindowHooks nativeWindows;
 NativeWindowHandoff windowHandoff;
+NativeScriptHandoff scriptHandoff;
 std::mutex windowMutex;
 struct WindowContext {BridgeMode mode{BridgeMode::Native};uint32_t epoch{};float units{1000.f};bool requested{};uint64_t sourceFrame{},updatedAt{};} windowContext;
 uint32_t beamngMenuEpoch=0xffffffff;bool beamngMenuSeen=false;
@@ -83,6 +85,8 @@ float units=1000.f,ySign=1.f,feetOffset=0.f,terrainRadius=256.f;
 bool hostAuthority=false;
 bool collisionComplete=false;
 Collision capturedTerrain{};
+std::vector<CollisionInstance> movingSurfaceBaseline;
+uint32_t movingSurfaceRevision{};ULONGLONG movingSurfaceTime{};
 int forwardKey='Z',backKey='S',leftKey='Q',rightKey='D',sneakKey=VK_LSHIFT,sprintKey=VK_LCONTROL,inventoryKey='X',dropKey='A',chatKey='T';
 ULONGLONG enemySendTime{};
 RenderPlacement worldPlacement{};
@@ -102,14 +106,14 @@ bool down(int key){return key>=0&&key<256&&(GetAsyncKeyState(key)&0x8000)!=0;}
 // Paused/cancelled additions stay preserved but do not run or capture keys.
 constexpr bool backendAvailable(BridgeMode backend){return backend==BridgeMode::Minecraft||backend==BridgeMode::BeamNG;}
 void cancelWindowHandoff(){
-    std::lock_guard lock(windowMutex);windowHandoff.cancel();windowContext={};
+    std::lock_guard lock(windowMutex);windowHandoff.cancel();scriptHandoff.cancel();windowContext={};
     if(guest)guest->setNativeTraversalHold(false);
 }
 uint64_t beginNativeWindow(void*){
     if(!game||!guest)return 0;
     const auto state=game->traversalState();uint64_t token{};
     {std::lock_guard lock(windowMutex);const auto now=GetTickCount64();token=windowHandoff.begin(windowContext.mode,
-        windowContext.requested&&now>=windowContext.updatedAt&&now-windowContext.updatedAt<250,state,windowContext.epoch,now,windowContext.units);
+        !scriptHandoff.blocksGuestMotion()&&windowContext.requested&&now>=windowContext.updatedAt&&now-windowContext.updatedAt<250,state,windowContext.epoch,now,windowContext.units);
         if(token)guest->setNativeTraversalHold(true);}
     if(token)logMessage("Minecraft window traversal: original RE4 action owns movement; source anchor retained.");
     return token;
@@ -251,7 +255,11 @@ void frame(IDirect3DDevice9* device){
     if(native.valid&&native.room!=lastRoom){lastRoom=native.room;epoch++;for(auto& backend:backends)backend.hud->clear();carPresentation.clear();heldCarPresentation.clear();worldSuccessTime=worldBootstrapTime=0;collisionEpoch=0xffffffff;collisionComplete=false;}
     if(updates.newSession){renderer->clear();hud->clear();carPresentation.clear();heldCarPresentation.clear();avatarEpoch=0xffffffff;collisionComplete=false;reportedMesh=false;reportedDiagnostics=false;worldSuccessTime=worldBootstrapTime=0;epoch++;}
     const auto windowState=game->traversalState();
-    WindowHandoffPhase windowPhase{};NativeTraversalState windowLanding{};bool windowFailed=false,windowAcknowledged=false;
+    // Camera data may be unavailable during a native movie; the scalar-only
+    // witness still reports the actual STA_EVENT begin/end ownership.
+    const auto scriptState=native.valid?native:game->protectionState();
+    WindowHandoffPhase windowPhase{},scriptPhase{};NativeTraversalState windowLanding{},scriptLanding{};
+    bool windowFailed=false,windowAcknowledged=false,scriptFailed=false,scriptAcknowledged=false,scriptBegan=false,scriptLanded=false;
     {
         std::lock_guard lock(windowMutex);
         if(mode!=BridgeMode::Minecraft||!enabled||!updates.connected||(windowHandoff.epoch()&&windowHandoff.epoch()!=epoch))windowHandoff.cancel();
@@ -266,24 +274,46 @@ void frame(IDirect3DDevice9* device){
             windowFailed=windowHandoff.currentPhase()==WindowHandoffPhase::Failed;
         }
         windowPhase=windowHandoff.currentPhase();windowLanding=windowHandoff.landing();
+        const auto previousScriptPhase=scriptHandoff.currentPhase();
+        scriptPhase=scriptHandoff.observe(mode==BridgeMode::Minecraft&&enabled&&updates.connected,
+            windowHandoff.blocksGuestMotion(),windowState,scriptState.cutscene,scriptState.canReplace(),epoch,
+            updates.motion.tick,GetTickCount64(),units);
+        const bool scriptAck=scriptPhase==WindowHandoffPhase::AwaitLanding&&scriptState.canReplace()
+            &&updates.newMotion&&updates.motionValid&&updates.motionAgeMs<250&&updates.motion.epoch==epoch
+            &&(updates.motion.flags&MotionNativeTraversalAck)&&!(updates.motion.flags&(MotionReady|MotionDead|MotionScreen))&&updates.motion.health>0;
+        if(scriptAck){const Vec3 feet{float(updates.motion.hostX*units),float(updates.motion.hostY*units*ySign),float(updates.motion.hostZ*units)};
+            scriptAcknowledged=scriptHandoff.acknowledge(windowState,epoch,updates.motion.tick,feet,true,GetTickCount64());}
+        scriptPhase=scriptHandoff.currentPhase();scriptLanding=scriptHandoff.landing();
+        scriptFailed=scriptPhase==WindowHandoffPhase::Failed;
+        scriptBegan=previousScriptPhase!=scriptPhase&&scriptPhase==WindowHandoffPhase::NativeAction;
+        scriptLanded=previousScriptPhase!=scriptPhase&&scriptPhase==WindowHandoffPhase::AwaitLanding;
         if(updates.newMotion&&updates.motionValid)windowContext.sourceFrame=updates.motion.tick;
         windowContext.mode=mode;windowContext.epoch=epoch;windowContext.units=units;
     }
-    if(windowAcknowledged){
+    if(scriptBegan)logMessage("Minecraft native event: STA_EVENT owns scripted movement; source anchor retained.");
+    if(scriptLanded)logMessage("Minecraft native event: actual native landing recorded; awaiting client/server source receipt.");
+    if(windowAcknowledged||scriptAcknowledged){
         // The original action used its own camera. Require a fresh world draw
         // after it instead of inheriting the pre-action presentation deadline.
         worldSuccessTime=worldBootstrapTime=0;
-        logMessage("Minecraft window traversal: actual source landing acknowledged; guest movement may resume.");
+        logMessage(scriptAcknowledged?"Minecraft native event: actual source landing acknowledged; guest movement may resume.":
+            "Minecraft window traversal: actual source landing acknowledged; guest movement may resume.");
     }
-    if(windowFailed){
+    if(windowFailed||scriptFailed){
         cancelWindowHandoff();enabled=false;mode=BridgeMode::Native;++epoch;
         guest->restore();camera->restore();controls->restore();hostInput->setActive(false,false);
         worldDesired=false;worldSuccessTime=worldBootstrapTime=0;windowPhase=WindowHandoffPhase::Idle;
-        logMessage("Minecraft window traversal failed its scoped landing receipt; restored native control.");
+        scriptPhase=WindowHandoffPhase::Idle;
+        logMessage(scriptFailed?"Minecraft native event failed its scoped landing receipt; restored native control.":
+            "Minecraft window traversal failed its scoped landing receipt; restored native control.");
     }
-    const bool windowOwnsMotion=windowPhase==WindowHandoffPhase::NativeAction||windowPhase==WindowHandoffPhase::AwaitLanding;
-    const bool windowNativeInput=windowOwnsMotion&&mode==BridgeMode::Minecraft&&foreground&&windowState.valid&&windowState.alive&&windowState.playing;
-    {std::lock_guard lock(windowMutex);guest->setNativeTraversalHold(windowHandoff.blocksGuestMotion());}
+    const bool windowOwnsMotion=windowPhase==WindowHandoffPhase::NativeAction||windowPhase==WindowHandoffPhase::AwaitLanding
+        ||scriptPhase==WindowHandoffPhase::NativeAction||scriptPhase==WindowHandoffPhase::AwaitLanding;
+    const bool windowNativeInput=windowOwnsMotion&&mode==BridgeMode::Minecraft&&foreground&&windowState.valid&&windowState.alive&&windowState.playing
+        &&(windowPhase==WindowHandoffPhase::NativeAction||windowPhase==WindowHandoffPhase::AwaitLanding
+            ||(scriptPhase==WindowHandoffPhase::AwaitLanding&&scriptState.canReplace()));
+    const bool nativeLandingInput=windowNativeInput&&(windowPhase==WindowHandoffPhase::AwaitLanding||scriptPhase==WindowHandoffPhase::AwaitLanding);
+    {std::lock_guard lock(windowMutex);guest->setNativeTraversalHold(windowHandoff.blocksGuestMotion()||scriptHandoff.blocksGuestMotion());}
     // The source closes the selector only after genuine adoption/cancellation.
     // ReplaceVehicle may reuse the same ID: a new epoch retires its old maps,
     // deformation endpoints, UI and collision authority before any new draw.
@@ -388,7 +418,9 @@ void frame(IDirect3DDevice9* device){
     // the real world pass has drawn successfully for this epoch.
     const bool worldAllowed=worldFresh||(!worldSuccessTime&&worldBootstrapTime&&now-worldBootstrapTime<=1000);
     {std::lock_guard lock(windowMutex);windowContext.requested=mode==BridgeMode::Minecraft&&wanted&&guestReady&&(motionFresh||windowOwnsMotion)&&!hostAuthority;windowContext.updatedAt=GetTickCount64();}
-    guest->setActive(!windowOwnsMotion&&wanted&&worldFresh&&(vehicleMode||sourceMode||!hostAuthority)&&guestReady&&motionFresh&&vehicleTerrainReady&&vehiclePhysicsReady&&sourcePhysicsReady,epoch,units,mode);
+    const bool guestMovementRequested=!windowOwnsMotion&&wanted&&worldFresh&&(vehicleMode||sourceMode||!hostAuthority)&&guestReady&&motionFresh&&vehicleTerrainReady&&vehiclePhysicsReady&&sourcePhysicsReady;
+    guest->setActive(guestMovementRequested,epoch,units,mode);
+    {std::lock_guard lock(windowMutex);if(mode==BridgeMode::Minecraft)scriptHandoff.arm(guestMovementRequested,windowState,epoch);}
     if(updates.newMotion&&!(updates.motion.flags&MotionNativeTraversalAck))guest->updateMotion(updates.motion);
     if(minecraftGameplayRoutes(mode)&&updates.newBlocks)guest->setBlocks(updates.blockEpoch,updates.blocks);
     for(const auto& melee:updates.melee)guest->applyMelee(melee);
@@ -428,7 +460,7 @@ void frame(IDirect3DDevice9* device){
             logMessage(line);++poseDiagnosticRows;lastPoseDiagnostic=now;
         }
     }
-    controls->setActive((active||vehicleMenuUI||(windowPhase==WindowHandoffPhase::AwaitLanding&&windowNativeInput))&&controlsReady);controls->setScreenOpen(screenOpen);
+    controls->setActive((active||vehicleMenuUI||nativeLandingInput)&&controlsReady);controls->setScreenOpen(screenOpen);
     controls->setGuestAuthority(windowOwnsMotion||vehicleMode||((sourceMode||!hostAuthority)&&guestReady&&guest->active()));
     hostInput->attach(device,transport,camera);hostInput->setActive((active||vehicleMenuUI)&&!windowOwnsMotion,screenOpen&&!windowOwnsMotion);
     Input input{};input.selectedSlot=0xffffffff;
@@ -439,7 +471,8 @@ void frame(IDirect3DDevice9* device){
     if(windowNativeInput)input.flags=Enabled|Focused|HostAuthority|NativeTraversal;
     input.hostEpoch=epoch;
     input.hostX=native.position.x/units;input.hostY=native.position.y/(units*ySign);input.hostZ=native.position.z/units;
-    if(windowNativeInput){const Vec3 target=windowPhase==WindowHandoffPhase::AwaitLanding?windowLanding.position:windowState.position;
+    if(windowNativeInput){const Vec3 target=scriptPhase==WindowHandoffPhase::AwaitLanding?scriptLanding.position:
+            windowPhase==WindowHandoffPhase::AwaitLanding?windowLanding.position:windowState.position;
         input.hostX=target.x/units;input.hostY=target.y/(units*ySign);input.hostZ=target.z/units;}
     constexpr float degrees=180.f/3.14159265358979323846f;
     // RE4 yaw turns toward +X; Minecraft's positive yaw turns toward -X.
@@ -487,21 +520,34 @@ void frame(IDirect3DDevice9* device){
             options.radius=terrainRadius*units;options.maxTriangles=200000;options.maxReadBytes=64u*1024u*1024u;
             const auto terrainStart=PerfClock::now();auto terrain=collision->capture(options);const double terrainCost=milliseconds(terrainStart);frameCosts.terrain+=terrainCost;frameCosts.terrainMax=std::max(frameCosts.terrainMax,terrainCost);collisionTime=now;
             if(terrain.valid){
-                Collision prefix{epoch,static_cast<uint32_t>(terrain.triangles.size()),terrain.complete&&!terrain.truncated?1u:terrain.truncated?2u:0u,0,options.center.x/units,options.center.y/(units*ySign),options.center.z/units,options.radius/units};std::vector<uint8_t> packet(sizeof(prefix)+terrain.triangles.size()*9*sizeof(float));std::memcpy(packet.data(),&prefix,sizeof(prefix));
+                const bool movingSources=mode==BridgeMode::Minecraft;
+                const uint32_t terrainFlags=terrain.complete&&!terrain.truncated?1u:terrain.truncated?2u:0u;
+                Collision prefix{epoch,static_cast<uint32_t>(terrain.triangles.size()),terrainFlags|(movingSources?4u:0u),movingSources?++movingSurfaceRevision:0u,options.center.x/units,options.center.y/(units*ySign),options.center.z/units,options.radius/units};std::vector<uint8_t> packet(sizeof(prefix)+terrain.triangles.size()*(9*sizeof(float)+(movingSources?12:0)));std::memcpy(packet.data(),&prefix,sizeof(prefix));
                 size_t at=sizeof(prefix);for(const auto& tri:terrain.triangles)for(const Vec3 point:{tri.a,tri.b,tri.c}){
                     float coords[]{point.x/units,point.y/(units*ySign),point.z/units};std::memcpy(packet.data()+at,coords,sizeof(coords));at+=sizeof(coords);
                 }
+                if(movingSources)for(const auto& tri:terrain.triangles){std::memcpy(packet.data()+at,&tri.sourceKey,8);std::memcpy(packet.data()+at+8,&tri.polygonIndex,4);at+=12;}
                 if(transport->sendPacket(Message::Collision,std::move(packet))){
                     static uint32_t previousFlags=0xffffffff;
                     if(collisionEpoch!=epoch||previousFlags!=prefix.flags){char line[256];sprintf_s(line,"Exported RE4 SAT terrain: %u triangles, %u active entries radius=%.0f blocks complete=%u truncated=%u rejected=%u read=%.2f MiB",prefix.triangleCount,terrain.activeEntries,prefix.radius,unsigned(terrain.complete),unsigned(terrain.truncated),terrain.rejectedEntries,terrain.bytesRead/1048576.);logMessage(line);previousFlags=prefix.flags;}
                     collisionEpoch=epoch;collisionCenter=options.center;
-                    collisionComplete=prefix.flags==1;
-                    capturedTerrain=prefix;
+                    collisionComplete=terrainFlags==1;
+                    capturedTerrain=prefix;capturedTerrain.flags=terrainFlags;capturedTerrain.reserved=0;
+                    movingSurfaceBaseline=movingSources?terrain.instances:std::vector<CollisionInstance>{};movingSurfaceTime=0;
                     collisionAcceptedTime=now;
                 }
                 else collisionComplete=false;
             }
             else collisionComplete=false;
+        }
+        if(mode==BridgeMode::Minecraft&&collisionEpoch==epoch&&now-movingSurfaceTime>=50){
+            movingSurfaceTime=now;std::vector<CollisionTransform> transforms;
+            if(CollisionExporter::captureTransforms(collision->satManager(),movingSurfaceBaseline,units,ySign,transforms)){
+                MovingSurfaces prefix{epoch,movingSurfaceRevision,uint32_t(transforms.size()),0,now};
+                std::vector<uint8_t> packet(sizeof(prefix)+transforms.size()*sizeof(MovingSurface));std::memcpy(packet.data(),&prefix,sizeof(prefix));size_t at=sizeof(prefix);
+                for(const auto& transform:transforms){MovingSurface surface{};surface.sourceKey=transform.key;surface.flags=transform.flags;std::memcpy(surface.matrix,transform.matrix,sizeof(surface.matrix));std::memcpy(packet.data()+at,&surface,sizeof(surface));at+=sizeof(surface);}
+                transport->sendPacket(Message::MovingSurfaces,std::move(packet));
+            }
         }
     }
     for(const auto& damage:guest->takeDamage()){
@@ -544,7 +590,7 @@ void frame(IDirect3DDevice9* device){
         camera->restore();hostInput->setActive(false,false);
         // Keep the ordinary native walking/combat filter during the bounded
         // landing receipt. The original action itself retains native controls.
-        if(!(windowPhase==WindowHandoffPhase::AwaitLanding&&windowNativeInput))controls->restore();
+        if(!nativeLandingInput)controls->restore();
     }
     // Record the gate that actually restored Leon, without interpreting OS
     // Control as the unrelated native SPF_CTRL processing-stop bit.

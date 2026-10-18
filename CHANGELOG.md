@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0-alpha.3
+
+- Reuse Minecraft 26.3 from an official installation or Prism data root/instance, including Prism's shared client, libraries, native classifiers and assets.
+- Restore the unconditional StackShadowPages=32 option required by pinned Minecraft 26.3 launch metadata; validate the effective JVM value in a real bootstrap. Write Windows Java argument files in the active system code page so supported non-ASCII paths survive; reject unsupported paths explicitly. Capture Java stdout/stderr before Minecraft logging and report exact exit codes and log locations.
+- Route Minecraft attacks through original boss/special-enemy consumers and weapon-power handling, preserving native weak-point, phase and protection rules instead of applying generic HP subtraction.
+- Include armed native mines/tripwires in targeting and retain their original damage/detonation routines.
+- Track moving RE4 collision geometry between full room captures and carry grounded Minecraft riders through its translation/rotation; release carry on jumps, lost support or stale data.
+- Export original block-entity models, textures and animations, including moving-block geometry and cracking overlays. Sign text and specialized portal shader effects remain unsupported.
+- Preserve the native landing after a scripted event and require Minecraft's server/client landing acknowledgement before guest movement resumes; keep native window handoff priority.
+- Preserve the selected world, inventories, AZERTY controls and X inventory. Isolated source scenes pass for block entities, moving riders and event landings; native campaign verification remains pending. Corrected launches succeed, but all intermittent native JVM crashes are not proven resolved.
+
 ## 0.2.0-alpha.2
 
 - Include the original collision meshes of larger wooden crates in Steve's targeting bounds, alongside their active native damage parts.
@@ -27,4 +38,4 @@
 - Expand wooden-box targeting to validated original physical bounds and retain original native damage/destruction.
 - Keep AZERTY movement and X inventory. Halo/BeamNG development is on hold; ULTRAKILL is cancelled.
 
-Packaged background launches, graceful save/shutdown and inventory reload passed. Final box/window gameplay verification in RE4 is pending. Completed checks and limits are recorded in `docs/RELEASE_VALIDATION.md`.
+Completed checks and remaining runtime/campaign limits are recorded in [docs/RELEASE_VALIDATION.md](docs/RELEASE_VALIDATION.md).

@@ -30,6 +30,16 @@ try {
     $meta.libraries=@($library); $library.downloads.artifact.sha1='0'*40; Reject { Resolve-MinecraftLibraries $meta $testRoot } 'Modified artifact rejected'
     $library.downloads.artifact.sha1=$hash; $library.downloads.artifact.size=8; Reject { Resolve-MinecraftLibraries $meta $testRoot } 'Wrong artifact size rejected'
     $library.downloads.artifact.size=7; $library.downloads.artifact.path='../escape.jar'; Reject { Resolve-MinecraftLibraries $meta $testRoot } 'Metadata traversal rejected'
+    $nativeRelative='org/lwjgl/lwjgl-sdl-natives-windows/3.4.3/lwjgl-sdl-natives-windows-3.4.3.jar'
+    $nativeJar=Assert-ChildPath $testRoot ('libraries/'+$nativeRelative)
+    New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($nativeJar)) -Force|Out-Null
+    [IO.File]::WriteAllText($nativeJar,'fixture')
+    $nativeLibrary=[pscustomobject]@{name='org.lwjgl:lwjgl-sdl:3.4.3:natives-windows';downloads=[pscustomobject]@{artifact=[pscustomobject]@{path='org/lwjgl/lwjgl-sdl/3.4.3/lwjgl-sdl-3.4.3-natives-windows.jar';sha1=$hash;size=7}}}
+    $nativeMeta=[pscustomobject]@{libraries=@($nativeLibrary)}
+    Check ((Get-PrismClassifierPath $nativeLibrary) -eq $nativeRelative) 'Prism modern classifier Maven artifact layout matches upstream'
+    Check (@(Resolve-MinecraftLibraries $nativeMeta $testRoot 'Prism')[0] -eq $nativeJar) 'Prism classifier jar resolves and verifies original hash'
+    [IO.File]::WriteAllText($nativeJar,'changed')
+    Reject {Resolve-MinecraftLibraries $nativeMeta $testRoot 'Prism'} 'Modified Prism native jar rejected'
     $instance=Join-Path $testRoot '.instance'
     $fresh=Read-WorldSelection $instance ''
     Check ($fresh.New -and $fresh.Name -eq 'RE4Craft_MirrorWorld') 'Fresh install creates one persistent mirror selection'
@@ -65,12 +75,42 @@ try {
     $settings=[pscustomobject]@{InstancePath=$instance;WorldName='Existing_World';ShutdownToken='a'*32}
     $args=@(New-MinecraftArguments $owned $payload $settings)
     Check ($args -contains '-Dre4craft.background=true') 'Background mode requested'
+    Check ($args -contains '-XX:StackShadowPages=32') 'Pinned official Minecraft 26.3 shadow-page requirement retained exactly'
     Check ($args -contains '-Dre4craft.testExitSeconds=0') 'Production client has no timed QA exit'
     Check ($args -contains '-Dre4craft.grantStarterBow=true') 'One-time saved starter bow requested'
     Check ($args -contains ('-Dre4craft.shutdownToken='+('a'*32))) 'Owned shutdown token passed to source'
     Check ($args -contains ('-Dre4craft.worldName=Existing_World')) 'Exact world selected'
     Check ($args -contains 'C:\Release\fabric.jar;C:\Minecraft libs\original.jar;C:\Minecraft\26.3.jar') 'Knot classpath built from owned files and Fabric'
     Check ($args -notcontains '--demo') 'No demo or multiplayer substitution'
+    $mixedDriveSettings=[pscustomobject]@{InstancePath=$instance;WorldName='Existing_World';ShutdownToken='a'*32;GamePath='D:\Games\Resident Evil 4'}
+    $mixedDriveArgs=@(New-MinecraftArguments $owned $payload $mixedDriveSettings)
+    Check (($mixedDriveArgs -join "`n") -ceq ($args -join "`n")) 'RE4 on another drive does not change Minecraft bootstrap paths'
+    $semicolonOwned=[pscustomobject]@{Libraries=@('C:\Minecraft;broken\original.jar');Client=$owned.Client;Assets=$owned.Assets;AssetIndex=$owned.AssetIndex}
+    Reject {New-MinecraftArguments $semicolonOwned $payload $settings} 'Unrepresentable classpath separator is rejected explicitly'
+    $prism=Join-Path $testRoot 'Prism portable'
+    $prismInstance=Join-Path $prism 'instances/26.3 with mods'
+    foreach($folder in @('libraries/com/mojang/minecraft/26.3','assets','instances/26.3 with mods/minecraft')) { New-Item -ItemType Directory -Path (Join-Path $prism $folder) -Force|Out-Null }
+    [IO.File]::WriteAllText((Join-Path $prism 'libraries/com/mojang/minecraft/26.3/minecraft-26.3-client.jar'),'fixture')
+    Write-ReleaseJson ([pscustomobject]@{components=@([pscustomobject]@{uid='net.minecraft';version='26.3'},[pscustomobject]@{uid='net.fabricmc.fabric-loader';version='0.19.5'})}) (Join-Path $prismInstance 'mmc-pack.json')
+    Check ((Resolve-MinecraftLocation $prism).Root -eq $prism) 'Portable Prism shared data root recognized without versions folder'
+    Check ((Resolve-MinecraftLocation $prismInstance).Root -eq $prism) 'Prism instance resolves shared libraries and assets'
+    Check ((Resolve-MinecraftLocation (Join-Path $prismInstance 'minecraft')).Instance -eq $prismInstance) 'Prism Minecraft Folder selection resolves instance'
+    Write-ReleaseJson ([pscustomobject]@{components=@([pscustomobject]@{uid='net.minecraft';version='1.21.1'})}) (Join-Path $prismInstance 'mmc-pack.json')
+    Reject {Resolve-MinecraftLocation $prismInstance} 'Other Prism instance version rejected rather than silently replaced'
+    Reject {Resolve-MinecraftLocation (Join-Path $testRoot 'missing')} 'Missing source installation rejected'
+    $nativeArgs=Join-Path $testRoot 'native.args'
+    $encoding=Get-JavaArgumentEncoding
+    $representable='ASCII'
+    foreach($codepoint in @(0xe9,0x416,0x4e16,0x3042,0xac00,0x627)) {
+        try { $candidate=[string][char]$codepoint; $null=$encoding.GetBytes($candidate); $representable=$candidate; break } catch { }
+    }
+    Write-JavaArgumentFile $nativeArgs @('-Dtest='+$representable,'C:\Path with spaces\client.jar')
+    Check ([IO.File]::ReadAllText($nativeArgs,$encoding).Contains($representable)) 'Argument file uses strict active Windows native encoding'
+    if ($encoding.CodePage -ne 65001) {
+        Reject {Write-JavaArgumentFile $nativeArgs @('-Dtest='+[char]::ConvertFromUtf32(0x1d11e))} 'Unrepresentable Unicode is rejected before launching'
+    }
+    $exitMessage=Get-MinecraftExitMessage ([pscustomobject]@{ExitCode=-1073741819}) $instance ([pscustomobject]@{Stderr='early.stderr.log';Stdout='early.stdout.log'})
+    Check ($exitMessage.Contains('0xC0000005') -and $exitMessage.Contains('early.stderr.log')) 'Early failure reports exact native code and stderr path'
     $fakeJava=Join-Path $testRoot 'java/bin/javaw.exe'
     New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($fakeJava)) -Force | Out-Null
     $bytes=New-Object byte[] 128; $bytes[0]=0x4d;$bytes[1]=0x5a;$bytes[0x3c]=0x40;$bytes[0x40]=0x50;$bytes[0x41]=0x45;$bytes[0x44]=0x64;$bytes[0x45]=0x86
@@ -82,6 +122,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $testRoot 'java/release'),'JAVA_VERSION="25.0.1"');Check (-not (Test-Java25 $fakeJava)) 'Unpatched Java 25.0.1 rejected'
     [IO.File]::WriteAllText((Join-Path $testRoot 'java/release'),'JAVA_VERSION="21.0.1"');Check (-not (Test-Java25 $fakeJava)) 'Old Java rejected'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Add-Type -AssemblyName System.IO.Compression
     function New-FakeRuntimeZip([string] $Path,[string[]] $Names){
         $stream=[IO.File]::Open($Path,[IO.FileMode]::CreateNew)
         $zip=[IO.Compression.ZipArchive]::new($stream,[IO.Compression.ZipArchiveMode]::Create)

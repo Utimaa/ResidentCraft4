@@ -4,17 +4,17 @@ Minecraft Java 26.3 gameplay inside original Resident Evil 4 UHD, with Minecraft
 
 The mod sends Minecraft's actual player meshes, textures, hands, HUD and inventory to RE4. Minecraft supplies movement, physics, blocks and combat; RE4 supplies terrain, native enemies and campaign scripts. Useful item drops progress with the campaign. The bridge preserves AZERTY controls and uses **X** for inventory.
 
-**Experimental release: 0.2.0-alpha.2.** The packaged background client, save/shutdown and inventory reload passed their runtime checks. The latest crate corrections still need a combined RE4 gameplay check. See [validation details](docs/RELEASE_VALIDATION.md).
+**Experimental release: 0.2.0-alpha.3.** This update adds Prism installation selection, fixes Windows launch-path encoding, and improves native boss/mine interactions, moving platforms, block-entity rendering and scripted landings. Source and component checks pass; the new engine scenes and combined RE4 campaign behavior still need verification. Intermittent native JVM crashes remain unresolved. See [validation details](docs/RELEASE_VALIDATION.md).
 
 ## Install
 
 Requirements: Windows, original **Resident Evil 4 UHD** on Steam, and owned **Minecraft Java 26.3**. The supported host is the original 32-bit UHD build tested as 1.1.0.
 
-1. Install Minecraft **26.3** in the official Launcher and open it once, then close it.
+1. Install Minecraft **26.3** in the official Launcher or Prism Launcher and open it once, then close it.
 2. Extract the Windows release ZIP and run **Setup.cmd** with RE4 closed.
 3. Run **Play.cmd**, load your RE4 campaign save and press **F8**.
 
-Minecraft starts with a hidden window and keeps running as a real background game process. The release reads your locally installed game files and uses a separate private world. Your original mods, worlds and account files are preserved. If your Java runtime is older than 25.0.4, Setup downloads a checksum-verified portable Temurin runtime into the release folder; it does not replace your system Java.
+Minecraft starts with a hidden window and keeps running as a real background game process. The release reads your locally installed game files and uses a separate private world. Your original mods, worlds and account files are preserved. Prism users can select their launcher data root or 26.3 instance; RE4 and Minecraft may be on different drives. See [installation selection and startup logs](docs/LAUNCHER.md). If your Java runtime is older than 25.0.4, Setup downloads a checksum-verified portable Temurin runtime into the release folder; it does not replace your system Java.
 
 See the [simple install guide](INSTALL.md) for controls, uninstall and troubleshooting. Java/Fabric build tools are not required to use the release. Keep the extracted release folder in place.
 

@@ -16,7 +16,7 @@ constexpr uint32_t MaxVehicleVertices = 300000; // sum of batch palettes
 constexpr uint32_t MaxVehicleIndices = 1500000; // complete source triangles
 constexpr uint32_t MaxVehicleBatches = 1024;
 constexpr uint32_t MaxVehicleSurfaceBytes = MaxPayload;
-enum class Message : uint16_t { State=1, Texture=2, Mesh=3, Hud=4, Motion=5, Melee=6, Blocks=7, TextureChunk=8, VehicleInfo=9, VehicleMeshChunk=10, VehiclePose=11, VehicleMaterial=12, VehicleSurfaceChunk=13, VehicleTextureChunk=14, VehicleDashboard=15, Input=16, Goodbye=17, KeyEvent=18, Text=19, Collision=20, Enemies=21, Damage=22, Loot=23 };
+enum class Message : uint16_t { State=1, Texture=2, Mesh=3, Hud=4, Motion=5, Melee=6, Blocks=7, TextureChunk=8, VehicleInfo=9, VehicleMeshChunk=10, VehiclePose=11, VehicleMaterial=12, VehicleSurfaceChunk=13, VehicleTextureChunk=14, VehicleDashboard=15, Input=16, Goodbye=17, KeyEvent=18, Text=19, Collision=20, Enemies=21, Damage=22, Loot=23, MovingSurfaces=24 };
 enum StateFlag : uint32_t { InWorld=1, ScreenOpen=2, OnGround=4, Crouching=8, Sprinting=16, Swimming=32, Dead=64 };
 // NativeTraversal is Minecraft-only, combined with HostAuthority and never
 // GuestAuthority. Its matching receipt grants no movement/combat authority.
@@ -93,9 +93,13 @@ struct VehicleDashboard {
 struct Hud { uint32_t width,height,flags,frame; }; // bit0: bottom-up RGBA rows; bit1: RGBA32 RLE
 struct KeyEvent { uint32_t scancode; int32_t action; uint32_t modifiers,reserved; };
 struct Collision {
-    uint32_t epoch,triangleCount,flags,reserved; // complete=1, truncated=2
+    uint32_t epoch,triangleCount,flags,reserved; // complete=1, truncated=2; Minecraft source IDs=4, reserved=revision
     float centerX,centerY,centerZ,radius; // host metres; complete coverage sphere
 }; // followed by triangleCount*9 floats
+// With Collision flag4, append triangleCount records {uint64 sourceKey,uint32 polygonIndex}.
+// Only Minecraft uses the extension; other peers retain the original layout.
+struct MovingSurfaces {uint32_t epoch,revision,count,reserved;uint64_t tick;};
+struct MovingSurface {uint64_t sourceKey;uint32_t flags;float matrix[3][4];}; // removed registration=1; base-world -> current-world affine metres
 // Mesh prefix followed by batch prefixes and each batch's Vertex array.
 // Category1 replaces avatar; category2 replaces Minecraft scene (optional).
 struct Mesh { uint32_t category,frame,batchCount,epoch; double hostOriginX,hostOriginY,hostOriginZ; };
@@ -155,6 +159,8 @@ static_assert(sizeof(State)==80);
 static_assert(sizeof(Input)==80);
 static_assert(sizeof(Mesh)==40);
 static_assert(sizeof(Collision)==32);
+static_assert(sizeof(MovingSurfaces)==24);
+static_assert(sizeof(MovingSurface)==60);
 static_assert(sizeof(GuestMotion)==108);
 static_assert(sizeof(GuestMelee)==64);
 static_assert(sizeof(Enemy)==72);

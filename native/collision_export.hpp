@@ -11,7 +11,13 @@ struct CollisionTriangle {
     uint32_t attributes{},sourceIndex{},polygonIndex{};
     CollisionSurface surface{CollisionSurface::Other};
     uint8_t managerKind{}; // 0 SAT, 1 EAT (diagnostic; semantics unverified)
+    uint64_t sourceKey{}; // registration identity, retained across matrix updates
 };
+struct CollisionInstance {
+    uint64_t key{};uintptr_t address{};uint32_t vertices{},polygons{};uint16_t vertexCount{},polygonCount{};
+    float matrix[3][4]{};
+};
+struct CollisionTransform {uint64_t key{};uint32_t flags{};float matrix[3][4]{};}; // invalid registration=1
 struct CollisionReadOptions {
     Vec3 center{}; // native RE4 world units
     float radius{3000.f}; // axis-aligned query extent, NOT triangle-center distance
@@ -24,6 +30,7 @@ struct CollisionSnapshot {
     uint32_t activeEntries{},rejectedEntries{};
     size_t bytesRead{};
     std::vector<CollisionTriangle> triangles;
+    std::vector<CollisionInstance> instances;
 };
 
 // Experimental read-only extraction. Call on the native game/render thread
@@ -38,6 +45,8 @@ public:
     uintptr_t eatManager() const { return eatManager_; }
     // Explicit-address decoder also supports synthetic, process-local fixtures.
     static CollisionSnapshot captureManager(uintptr_t address,const CollisionReadOptions& options,uint8_t managerKind=0);
+    // Read only the bounded SAT entry array, never reread room mesh geometry.
+    static bool captureTransforms(uintptr_t manager,const std::vector<CollisionInstance>& baseline,float units,float ySign,std::vector<CollisionTransform>&);
 private:
     uintptr_t satManager_{},eatManager_{};
 };

@@ -38,6 +38,18 @@ template<class T> bool read(uintptr_t address,T& out) { return copyMemory(addres
 bool finite(const Vec3& v) { return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z)&&std::abs(v.x)<1e8f&&std::abs(v.y)<1e8f&&std::abs(v.z)<1e8f; }
 bool optionsValid(const CollisionReadOptions& o) { return finite(o.center)&&std::isfinite(o.radius)&&o.radius>0&&o.radius<=10000000&&o.maxTriangles>0&&o.maxTriangles<=HardMaxTriangles&&o.maxReadBytes>=0xc0&&o.maxReadBytes<=HardMaxReadBytes; }
 Vec3 transform(const float m[3][4],const Vec3& p) { return {m[0][0]*p.x+m[0][1]*p.y+m[0][2]*p.z+m[0][3],m[1][0]*p.x+m[1][1]*p.y+m[1][2]*p.z+m[1][3],m[2][0]*p.x+m[2][1]*p.y+m[2][2]*p.z+m[2][3]}; }
+uint64_t sourceKey(uintptr_t entry,uint32_t vp,uint32_t pp,uint16_t vn,uint16_t pn){
+    uint64_t key=1469598103934665603ULL;for(uint64_t value:{uint64_t(entry),uint64_t(vp),uint64_t(pp),uint64_t(vn),uint64_t(pn)}){key^=value;key*=1099511628211ULL;}return key?key:1;
+}
+bool relativeMatrix(const float current[3][4],const float base[3][4],float units,float ySign,float out[3][4]){
+    const double a=base[0][0],b=base[0][1],c=base[0][2],d=base[1][0],e=base[1][1],f=base[1][2],g=base[2][0],h=base[2][1],i=base[2][2];
+    const double determinant=a*(e*i-f*h)-b*(d*i-f*g)+c*(d*h-e*g);if(!std::isfinite(determinant)||std::abs(determinant)<1e-8)return false;
+    const double inverse[3][3]{{(e*i-f*h)/determinant,(c*h-b*i)/determinant,(b*f-c*e)/determinant},
+        {(f*g-d*i)/determinant,(a*i-c*g)/determinant,(c*d-a*f)/determinant},
+        {(d*h-e*g)/determinant,(b*g-a*h)/determinant,(a*e-b*d)/determinant}};
+    const double scales[]{double(units),double(units*ySign),double(units)};
+    for(size_t row=0;row<3;++row){double translation=current[row][3];for(size_t col=0;col<3;++col){double v{};for(size_t k=0;k<3;++k)v+=current[row][k]*inverse[k][col];translation-=v*base[col][3];out[row][col]=float(v*scales[col]/scales[row]);if(!std::isfinite(out[row][col])||std::abs(out[row][col])>4)return false;}out[row][3]=float(translation/scales[row]);if(!std::isfinite(out[row][3])||std::abs(out[row][3])>30000000)return false;}return true;
+}
 bool intersects(const CollisionTriangle& t,const CollisionReadOptions& o) {
     return std::min({t.a.x,t.b.x,t.c.x})<=o.center.x+o.radius && std::max({t.a.x,t.b.x,t.c.x})>=o.center.x-o.radius &&
         std::min({t.a.y,t.b.y,t.c.y})<=o.center.y+o.radius && std::max({t.a.y,t.b.y,t.c.y})>=o.center.y-o.radius &&
@@ -116,6 +128,8 @@ CollisionSnapshot CollisionExporter::captureManager(uintptr_t address,const Coll
         // A room unload / moving instance during capture invalidates this entry.
         if (sat!=check) entryValid=false;
         if (!entryValid) { ++out.rejectedEntries;out.complete=false;continue; }
+        const size_t firstTriangle=out.triangles.size();
+        const auto key=sourceKey(entry,vp,pp,vn,pn);
         for(uint32_t poly=0;poly<pn;++poly) {
             const auto& p=polygons[poly];CollisionTriangle t{};
             t.a=transform(matrix,vertices[p[0]]);t.b=transform(matrix,vertices[p[1]]);t.c=transform(matrix,vertices[p[2]]);
@@ -126,16 +140,36 @@ CollisionSnapshot CollisionExporter::captureManager(uintptr_t address,const Coll
             double nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx,length=std::sqrt(nx*nx+ny*ny+nz*nz);
             if(length<1e-8)continue;
             t.normal={static_cast<float>(nx/length),static_cast<float>(ny/length),static_cast<float>(nz/length)};
-            t.attributes=(uint32_t(p[8])<<16)|p[9];t.sourceIndex=index;t.polygonIndex=poly;t.managerKind=kind;
+            t.attributes=(uint32_t(p[8])<<16)|p[9];t.sourceIndex=index;t.polygonIndex=poly;t.managerKind=kind;t.sourceKey=key;
             if(poly<floors)t.surface=CollisionSurface::Floor;else if(poly<uint32_t(floors)+slopes)t.surface=CollisionSurface::Slope;else if(walls && poly>=uint32_t(pn)-walls)t.surface=CollisionSurface::Wall;
             if(out.triangles.size()>=o.maxTriangles){out.complete=false;out.truncated=true;break;}
             out.triangles.push_back(t);
         }
+        if(out.triangles.size()!=firstTriangle){CollisionInstance instance{};instance.key=key;instance.address=entry;instance.vertices=vp;instance.polygons=pp;instance.vertexCount=vn;instance.polygonCount=pn;std::memcpy(instance.matrix,matrix,sizeof(matrix));out.instances.push_back(instance);}
         if(out.truncated)break;
     }
     std::array<uint8_t,0x20> check{};
     if (!read(address,check) || header!=check) { out.valid=false;out.complete=false;out.triangles.clear(); }
     return out;
+}
+
+bool CollisionExporter::captureTransforms(uintptr_t address,const std::vector<CollisionInstance>& baseline,float units,float ySign,std::vector<CollisionTransform>& output){
+    output.clear();if(!std::isfinite(units)||units<=0||!std::isfinite(ySign)||std::abs(ySign)!=1||baseline.size()>MaxEntries)return false;
+    std::array<uint8_t,0x20> header{},check{};if(!read(address,header))return false;
+    const uint32_t array=field<uint32_t>(header,4),count=field<uint32_t>(header,8),stride=field<uint32_t>(header,0xc);
+    if(count>MaxEntries||stride!=0xc0||(count&&(!array||uint64_t(array)+uint64_t(count)*stride>UINTPTR_MAX)))return false;
+    std::vector<std::array<uint8_t,0xc0>> entries(count);if(count&&!copyMemory(array,entries.data(),entries.size()*0xc0))return false;
+    if(!read(address,check)||header!=check)return false;
+    for(const auto& base:baseline){CollisionTransform result{};result.key=base.key;
+        bool valid=base.address>=array&&(base.address-array)%stride==0&&(base.address-array)/stride<count;
+        float matrix[3][4]{};
+        if(valid){const auto& sat=entries[(base.address-array)/stride];valid=(field<uint32_t>(sat,4)&0x201)==1&&(sat[0x2a]&4)
+            &&field<uint32_t>(sat,0xc)==base.vertices&&field<uint32_t>(sat,0x18)==base.polygons&&field<uint16_t>(sat,0x1c)==base.vertexCount&&field<uint16_t>(sat,0x1e)==base.polygonCount;
+            std::memcpy(matrix,sat.data()+0x60,sizeof(matrix));}
+        if(!valid||!relativeMatrix(matrix,base.matrix,units,ySign,result.matrix)){result.flags=1;output.push_back(result);continue;}
+        if(std::memcmp(matrix,base.matrix,sizeof(matrix)))output.push_back(result);
+    }
+    return true;
 }
 
 CollisionSnapshot CollisionExporter::capture(const CollisionReadOptions& o) const {

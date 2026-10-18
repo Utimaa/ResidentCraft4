@@ -25,6 +25,21 @@ int main() {
     if(!good.valid||!good.complete||good.triangles.size()!=1)return 1;
     const auto& t=good.triangles[0];
     if(!equal(t.a.x,10)||!equal(t.a.y,20)||!equal(t.a.z,30)||!equal(t.b.z,31)||!equal(t.c.x,11)||!equal(t.normal.y,1)||t.attributes!=0x1234abcd||t.surface!=CollisionSurface::Floor)return 2;
+    if(good.instances.size()!=1||!t.sourceKey||t.sourceKey!=good.instances[0].key)return 20;
+    std::vector<CollisionTransform> moving;
+    auto transforms=[&](){return CollisionExporter::captureTransforms(reinterpret_cast<uintptr_t>(manager.data()),good.instances,1000,1,moving);};
+    if(!transforms()||!moving.empty())return 21;
+    float shifted[3][4]{{1,0,0,1010},{0,1,0,2020},{0,0,1,3030}};std::memcpy(sat.data()+0x60,shifted,sizeof(shifted));
+    if(!transforms()||moving.size()!=1||moving[0].flags||!equal(moving[0].matrix[0][3],1)||!equal(moving[0].matrix[1][3],2)||!equal(moving[0].matrix[2][3],3))return 22;
+    // Rotate90 around the origin and translate: relative transform must retain
+    // the original off-centre support point, never just add platform velocity.
+    float rotated[3][4]{{0,0,-1,1010},{0,1,0,2020},{1,0,0,3030}};std::memcpy(sat.data()+0x60,rotated,sizeof(rotated));
+    if(!transforms()||moving.size()!=1||moving[0].flags||!equal(moving[0].matrix[0][2],-1)||!equal(moving[0].matrix[2][0],1)||!equal(moving[0].matrix[0][3],1.04f)||!equal(moving[0].matrix[2][3],3.02f))return 23;
+    put(sat,0x18,uint32_t(pointer(polygons)+20));if(!transforms()||moving.size()!=1||moving[0].flags!=1)return 24;put(sat,0x18,pointer(polygons));
+    sat[0x2a]=0;if(!transforms()||moving.size()!=1||moving[0].flags!=1)return 25;sat[0x2a]=4;
+    rotated[0][0]=NAN;std::memcpy(sat.data()+0x60,rotated,sizeof(rotated));if(!transforms()||moving.size()!=1||moving[0].flags!=1)return 26;
+    std::memcpy(sat.data()+0x60,matrix,sizeof(matrix));if(!transforms()||!moving.empty())return 27;
+    put(manager,0xc,uint32_t(1));if(transforms())return 28;put(manager,0xc,uint32_t(0xc0));
     options.center={1000,1000,1000};if(!capture().triangles.empty())return 3;options.center={10,20,30};
     polygons[0][2]=99;auto bad=capture();if(!bad.valid||bad.complete||bad.rejectedEntries!=1||!bad.triangles.empty())return 4;polygons[0][2]=2;
     options.maxReadBytes=0xc0;auto limited=capture();if(!limited.truncated||limited.complete)return 5;options.maxReadBytes=32*1024*1024;

@@ -39,7 +39,7 @@ function Assert-FileHash([string] $Path, [string] $Hash, [string] $Algorithm = '
 function Read-ReleasePayload([string] $Root) {
     $payload = Assert-ChildPath $Root 'payload'
     $manifest = Read-JsonFile (Assert-ChildPath $payload 'manifest.json')
-    if ($manifest.SchemaVersion -ne 1 -or $manifest.Version -ne '0.2.0-alpha.2') { throw 'Unsupported release payload.' }
+    if ($manifest.SchemaVersion -ne 1 -or $manifest.Version -ne '0.2.0-alpha.3') { throw 'Unsupported release payload.' }
     $seen = @{}
     foreach ($entry in $manifest.Files) {
         if ($entry.Path -notmatch '^(RE4Craft\.(asi|ini)|winmm\.dll|re4craft-fabric\.jar|fabric-api\.jar|fabric-launch\.json|fabric-libraries/[A-Za-z0-9+._-]+\.jar)$' -or $seen.ContainsKey($entry.Path)) { throw 'Unexpected or duplicate release payload file.' }
@@ -78,7 +78,16 @@ function Test-WindowsLibrary([object] $Library) {
     }
     $allowed
 }
-function Resolve-MinecraftLibraries([object] $Metadata, [string] $MinecraftPath) {
+function Get-PrismClassifierPath([object] $Library) {
+    # Prism splits modern native classifiers into their own Maven artifacts.
+    # The pinned Mojang hash/size still validates exactly the original jar.
+    if ($Library.name -match '^([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):([A-Za-z0-9+_.-]+):([A-Za-z0-9_.-]+)$') {
+        $artifact = $Matches[2] + '-' + $Matches[4]
+        return $Matches[1].Replace('.','/') + '/' + $artifact + '/' + $Matches[3] + '/' + $artifact + '-' + $Matches[3] + '.jar'
+    }
+    $null
+}
+function Resolve-MinecraftLibraries([object] $Metadata, [string] $MinecraftPath, [string] $Layout = 'Official') {
     $libraryRoot = Assert-ChildPath $MinecraftPath 'libraries'
     $paths = @(); $seen = @{}
     foreach ($library in $Metadata.libraries) {
@@ -87,6 +96,13 @@ function Resolve-MinecraftLibraries([object] $Metadata, [string] $MinecraftPath)
         if ($library.PSObject.Properties['natives']) { throw 'Legacy extracted native layout is unsupported for Minecraft 26.3.' }
         $artifact = $library.downloads.artifact
         $path = Assert-ChildPath $libraryRoot $artifact.path
+        if ($Layout -eq 'Prism') {
+            $prismRelative = Get-PrismClassifierPath $library
+            if ($prismRelative) {
+                $prismPath = Assert-ChildPath $libraryRoot $prismRelative
+                if (Test-Path -LiteralPath $prismPath -PathType Leaf) { $path = $prismPath }
+            }
+        }
         if ($artifact.path -notmatch '\.jar$' -or $seen.ContainsKey($path)) { throw 'Invalid or duplicate Minecraft library.' }
         $seen[$path] = $true
         Assert-FileHash $path $artifact.sha1 'SHA1'
@@ -96,15 +112,77 @@ function Resolve-MinecraftLibraries([object] $Metadata, [string] $MinecraftPath)
     if ($paths.Count -eq 0) { throw 'Minecraft libraries are missing.' }
     $paths
 }
-function Resolve-OwnedMinecraft([string] $MinecraftPath, [bool] $CheckAssetObjects = $true) {
-    $minecraft = Get-FullPath $MinecraftPath
-    $metadataPath = Assert-ChildPath $minecraft 'versions/26.3/26.3.json'
+function Resolve-MinecraftLocation([string] $MinecraftPath) {
+    $selected = Get-FullPath $MinecraftPath
+    Assert-NoReparse $selected
+    if (Test-Path -LiteralPath (Assert-ChildPath $selected 'versions/26.3/26.3.json') -PathType Leaf) {
+        return [pscustomobject]@{Root=$selected;Layout='Official';Instance=$null}
+    }
+    # Prism's instance game folder has no versions directory. Libraries and
+    # assets are shared at the launcher data root, including portable installs.
+    $instance = $selected
+    if ([IO.Path]::GetFileName($instance) -in @('minecraft','.minecraft')) { $instance = [IO.Path]::GetDirectoryName($instance) }
+    $packPath = Assert-ChildPath $instance 'mmc-pack.json'
+    if (Test-Path -LiteralPath $packPath -PathType Leaf) {
+        $pack = Read-JsonFile $packPath
+        $components = @($pack.components | Where-Object uid -eq 'net.minecraft')
+        if ($components.Count -ne 1 -or $components[0].version -ne '26.3') { throw 'Select a Prism instance using Minecraft 26.3, then launch it once in Prism.' }
+        $cursor = [IO.Path]::GetDirectoryName($instance)
+        while ($cursor) {
+            if ((Test-Path -LiteralPath (Join-Path $cursor 'libraries') -PathType Container) -and (Test-Path -LiteralPath (Join-Path $cursor 'assets') -PathType Container)) {
+                Assert-NoReparse $cursor
+                return [pscustomobject]@{Root=$cursor;Layout='Prism';Instance=$instance}
+            }
+            $cursor = [IO.Path]::GetDirectoryName($cursor)
+        }
+        throw 'Prism shared libraries/assets were not found. Supply -MinecraftPath with its launcher data root.'
+    }
+    if ((Test-Path -LiteralPath (Assert-ChildPath $selected 'libraries/com/mojang/minecraft/26.3/minecraft-26.3-client.jar') -PathType Leaf) -and (Test-Path -LiteralPath (Assert-ChildPath $selected 'assets') -PathType Container)) {
+        return [pscustomobject]@{Root=$selected;Layout='Prism';Instance=$null}
+    }
+    throw 'Minecraft 26.3 was not found here. Choose the official .minecraft folder, a Prism data root, or a Prism 26.3 instance folder after launching it once.'
+}
+function Get-MinecraftMetadataPath([object] $Location, [string] $CacheRoot, [bool] $AllowDownload) {
+    if ($Location.Layout -eq 'Official') { return Assert-ChildPath $Location.Root 'versions/26.3/26.3.json' }
+    if (-not $CacheRoot) { throw 'Prism needs the verified Minecraft metadata cache. Run Setup.cmd.' }
+    $path = Assert-ChildPath $CacheRoot '.re4craft/metadata/26.3.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        if (-not $AllowDownload) { throw 'Minecraft metadata cache is missing. Run Setup.cmd again.' }
+        New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($path)) -Force | Out-Null
+        $temporary = $path + '.' + [Guid]::NewGuid().ToString('N') + '.partial'
+        try {
+            # Only public version metadata is fetched. Game jars, libraries and
+            # assets must already belong to the user's launched installation.
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://piston-meta.mojang.com/v1/packages/702fe59163c6ee6578607daa85811d9bc9c7cc40/26.3.json' -OutFile $temporary
+            Assert-FileHash $temporary '702fe59163c6ee6578607daa85811d9bc9c7cc40' 'SHA1'
+            Move-Item -LiteralPath $temporary -Destination $path
+        } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary } }
+    }
+    $path
+}
+function Select-MinecraftPath {
+    $official = Join-Path $env:APPDATA '.minecraft'
+    if (Test-Path -LiteralPath (Join-Path $official 'versions/26.3/26.3.json') -PathType Leaf) { return $official }
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = [Windows.Forms.FolderBrowserDialog]::new()
+    $dialog.Description = 'Choose your Minecraft folder, Prism Launcher data root, or Prism 26.3 instance folder.'
+    $dialog.ShowNewFolderButton = $false
+    try {
+        if ($dialog.ShowDialog() -ne [Windows.Forms.DialogResult]::OK) { throw 'No Minecraft installation selected. Run Setup.cmd -MinecraftPath "your Minecraft or Prism folder".' }
+        $dialog.SelectedPath
+    } finally { $dialog.Dispose() }
+}
+function Resolve-OwnedMinecraft([string] $MinecraftPath, [bool] $CheckAssetObjects = $true, [string] $CacheRoot = '', [bool] $AllowMetadataDownload = $false) {
+    $location = Resolve-MinecraftLocation $MinecraftPath
+    $minecraft = $location.Root
+    $metadataPath = Get-MinecraftMetadataPath $location $CacheRoot $AllowMetadataDownload
     Assert-FileHash $metadataPath '702fe59163c6ee6578607daa85811d9bc9c7cc40' 'SHA1'
     $metadata = Read-JsonFile $metadataPath
     if ($metadata.id -ne '26.3' -or $metadata.mainClass -ne 'net.minecraft.client.main.Main' -or $metadata.javaVersion.majorVersion -ne 25 -or $metadata.downloads.client.sha1 -ne 'e877b6a07acd633fb3bb475002175cec036e7b87') { throw 'Install and launch the official Minecraft Java 26.3 version first.' }
-    $client = Assert-ChildPath $minecraft 'versions/26.3/26.3.jar'
+    $clientRelative = if ($location.Layout -eq 'Prism') { 'libraries/com/mojang/minecraft/26.3/minecraft-26.3-client.jar' } else { 'versions/26.3/26.3.jar' }
+    $client = Assert-ChildPath $minecraft $clientRelative
     Assert-FileHash $client $metadata.downloads.client.sha1 'SHA1'
-    $libraries = @(Resolve-MinecraftLibraries $metadata $minecraft)
+    $libraries = @(Resolve-MinecraftLibraries $metadata $minecraft $location.Layout)
     $assets = Assert-ChildPath $minecraft 'assets'
     if ($metadata.assetIndex.id -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid asset index name.' }
     $index = Assert-ChildPath $assets ('indexes/' + $metadata.assetIndex.id + '.json')
@@ -124,10 +202,10 @@ function Resolve-OwnedMinecraft([string] $MinecraftPath, [bool] $CheckAssetObjec
         $assetFile = [IO.FileInfo]::new($assetPath)
         if (-not $assetFile.Exists -or $assetFile.Length -ne $asset.size -or ($assetFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Minecraft assets are incomplete. Launch 26.3 once in the official Minecraft Launcher, then run Setup again.' }
     } }
-    [pscustomobject]@{ Root = $minecraft; Client = $client; Libraries = $libraries; Assets = $assets; AssetIndex = $metadata.assetIndex.id }
+    [pscustomobject]@{ Root = $minecraft; Layout = $location.Layout; SourceInstance = $location.Instance; Client = $client; Libraries = $libraries; Assets = $assets; AssetIndex = $metadata.assetIndex.id }
 }
 function Test-Java25([string] $JavaPath) {
-    if (-not (Test-Path -LiteralPath $JavaPath -PathType Leaf) -or [IO.Path]::GetFileName($JavaPath) -ne 'javaw.exe') { return $false }
+    if (-not (Test-Path -LiteralPath $JavaPath -PathType Leaf) -or [IO.Path]::GetFileName($JavaPath) -notin @('javaw.exe','java.exe')) { return $false }
     Assert-NoReparse $JavaPath
     $releaseFile = Join-Path ([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($JavaPath))) 'release'
     if (-not (Test-Path -LiteralPath $releaseFile -PathType Leaf)) { return $false }
@@ -146,7 +224,7 @@ function Test-Java25([string] $JavaPath) {
     } finally { $reader.Dispose(); $stream.Dispose() }
 }
 function Resolve-Java25([string] $MinecraftPath, [string] $JavaPath) {
-    if ($JavaPath) { $full = Get-FullPath $JavaPath; if (Test-Java25 $full) { return $full }; throw 'JavaPath must name a 64-bit Java 25.0.4 or newer bin/javaw.exe.' }
+    if ($JavaPath) { $full = Get-FullPath $JavaPath; if (Test-Java25 $full) { return $full }; throw 'JavaPath must name a 64-bit Java 25.0.4 or newer bin/javaw.exe or bin/java.exe.' }
     $roots = @(
         (Join-Path $MinecraftPath 'runtime'),
         (Join-Path $env:LOCALAPPDATA 'Packages/Microsoft.4297127D64EC6_8wekyb3d8bbwe/LocalCache/Local/runtime'),
@@ -209,17 +287,105 @@ function ConvertTo-JavaArgument([string] $Argument) {
     if ($Argument -match '[\r\n]') { throw 'Invalid launch argument.' }
     '"' + $Argument.Replace('\','\\').Replace('"','\"') + '"'
 }
+function Initialize-NativeLauncher {
+    if ('RE4Craft.NativeLauncher' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace RE4Craft {
+    public sealed class BackgroundProcess : IDisposable {
+        private IntPtr process;
+        public int Id { get; private set; }
+        public IntPtr Handle { get { return process; } }
+        internal BackgroundProcess(IntPtr handle, uint id) { process = handle; Id = (int)id; }
+        public bool HasExited { get { return NativeLauncher.WaitForSingleObject(process, 0) == 0; } }
+        public int ExitCode { get { uint code; if (!NativeLauncher.GetExitCodeProcess(process, out code)) throw new Win32Exception(); return unchecked((int)code); } }
+        public void WaitForExit() { NativeLauncher.WaitForSingleObject(process, 0xffffffff); }
+        public void Dispose() { if (process != IntPtr.Zero) { NativeLauncher.CloseHandle(process); process = IntPtr.Zero; } }
+    }
+    public static class NativeLauncher {
+        [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] private struct StartupInfo {
+            public int cb; public string reserved, desktop, title; public uint x,y,xSize,ySize,xChars,yChars,fill,flags; public short show, reservedBytes; public IntPtr reserved2, input, output, error;
+        }
+        [StructLayout(LayoutKind.Sequential)] private struct ProcessInfo { public IntPtr process, thread; public uint processId, threadId; }
+        [DllImport("kernel32.dll")] public static extern uint GetACP();
+        [DllImport("kernel32.dll", SetLastError=true)] public static extern uint WaitForSingleObject(IntPtr handle, uint timeout);
+        [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetExitCodeProcess(IntPtr handle, out uint exitCode);
+        [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+        [DllImport("kernel32.dll", SetLastError=true)] private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern IntPtr CreateFileW(string name, uint access, uint sharing, IntPtr security, uint creation, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern bool CreateProcessW(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInfo info);
+        public static BackgroundProcess Start(string executable, string argumentFile, string directory, string stdout, string stderr) {
+            using (var output = new FileStream(stdout, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite))
+            using (var error = new FileStream(stderr, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite)) {
+                IntPtr input = CreateFileW("NUL", 0x80000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+                if (input == new IntPtr(-1)) throw new Win32Exception();
+                var handles = new [] { output.SafeFileHandle.DangerousGetHandle(), error.SafeFileHandle.DangerousGetHandle(), input };
+                try {
+                    foreach (var handle in handles) if (!SetHandleInformation(handle, 1, 1)) throw new Win32Exception();
+                    var startup = new StartupInfo { cb=Marshal.SizeOf(typeof(StartupInfo)), flags=0x100, input=handles[2], output=handles[0], error=handles[1] };
+                    ProcessInfo info;
+                    var command = new StringBuilder("\"" + executable + "\" \"@" + argumentFile + "\"");
+                    if (!CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, true, 0x08000000, IntPtr.Zero, directory, ref startup, out info)) throw new Win32Exception();
+                    CloseHandle(info.thread);
+                    return new BackgroundProcess(info.process, info.processId);
+                } finally { foreach (var handle in handles) SetHandleInformation(handle, 1, 0); CloseHandle(input); }
+            }
+        }
+    }
+}
+'@
+}
+function Get-JavaArgumentEncoding {
+    Initialize-NativeLauncher
+    [Text.Encoding]::GetEncoding([int][RE4Craft.NativeLauncher]::GetACP(),[Text.EncoderExceptionFallback]::new(),[Text.DecoderExceptionFallback]::new())
+}
+function Write-JavaArgumentFile([string] $Path, [string[]] $Arguments) {
+    $text = ($Arguments | ForEach-Object { ConvertTo-JavaArgument $_ }) -join [Environment]::NewLine
+    try { $null = (Get-JavaArgumentEncoding).GetBytes($text + [Environment]::NewLine + $Path) }
+    catch [Text.EncoderFallbackException] { throw 'A launch path contains characters unsupported by this Windows Java launcher code page. Move the RE4Craft release/private instance or choose an owned Minecraft installation under a path representable in your Windows system language, then run Setup again. Existing files and saves were preserved.' }
+    # Java's native Windows @file reader uses the active ANSI code page, even
+    # when Java's default file.encoding is UTF-8. PowerShell 7 Encoding.Default
+    # is also UTF-8 and must not determine this format.
+    [IO.File]::WriteAllBytes($Path, (Get-JavaArgumentEncoding).GetBytes($text))
+}
+function Start-BackgroundJava([string] $JavaPath, [string] $ArgumentFile, [string] $InstancePath, [string] $Stdout, [string] $Stderr) {
+    Initialize-NativeLauncher
+    $console = Join-Path ([IO.Path]::GetDirectoryName($JavaPath)) 'java.exe'
+    try { $null = (Get-JavaArgumentEncoding).GetBytes($console) }
+    catch [Text.EncoderFallbackException] { throw 'The Java runtime path contains characters unsupported by the Windows Java launcher code page. Choose a Java installation under a path representable in the Windows system language, then run Setup again.' }
+    if (-not (Test-Java25 $console)) { throw 'The selected Java runtime lacks a verified x64 bin/java.exe. Run Setup with a complete Java 25.0.4 or newer runtime.' }
+    # Inherited disk handles capture errors before Fabric/Log4j without a pipe
+    # owned by this PowerShell process. CREATE_NO_WINDOW keeps the client hidden.
+    [RE4Craft.NativeLauncher]::Start($console,$ArgumentFile,$InstancePath,$Stdout,$Stderr)
+}
+function Get-MinecraftExitMessage([object] $Process, [string] $InstancePath, [object] $Logs) {
+    $code = $Process.ExitCode
+    $unsigned = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$code),0)
+    $message = ('Background Minecraft exited with code {0} (0x{1:X8}).' -f $code,$unsigned)
+    if ($Logs) { $message += [Environment]::NewLine + 'Java stderr: ' + $Logs.Stderr + [Environment]::NewLine + 'Java stdout: ' + $Logs.Stdout }
+    $message += [Environment]::NewLine + 'Minecraft log (if created): ' + (Assert-ChildPath $InstancePath 'logs/latest.log') + [Environment]::NewLine + 'JVM crash reports (if created): ' + (Assert-ChildPath $InstancePath '.re4craft/hs_err_pid%p.log')
+    $message
+}
 function New-MinecraftArguments([object] $Owned, [object] $Payload, [object] $Settings) {
     if ($Settings.ShutdownToken -notmatch '^[A-Za-z0-9_-]{32,96}$') { throw 'Invalid owned launch shutdown token.' }
     $natives = Assert-ChildPath $Settings.InstancePath '.natives'
-    $classpath = (@($Payload.FabricLibraries) + @($Owned.Libraries) + @($Owned.Client)) -join ';'
-    @('-Xms256M','-Xmx2G','--enable-native-access=ALL-UNNAMED','--add-exports','java.base/jdk.internal.misc=ALL-UNNAMED',
+    $classpathEntries = @($Payload.FabricLibraries) + @($Owned.Libraries) + @($Owned.Client)
+    foreach ($entry in $classpathEntries) { if ($entry.Contains(';')) { throw 'A library path contains a semicolon, which Java treats as a classpath separator. Choose an installation/release path without semicolons and run Setup again; original files were preserved.' } }
+    $classpath = $classpathEntries -join ';'
+    # Minecraft 26.3's pinned Mojang arguments.jvm requires this exact shadow
+    # page count. Keep launch parity; this is not a larger Java stack setting.
+    @('-Xms256M','-Xmx2G','-XX:StackShadowPages=32','--enable-native-access=ALL-UNNAMED','--add-exports','java.base/jdk.internal.misc=ALL-UNNAMED',
       ('-XX:ErrorFile=' + (Assert-ChildPath $Settings.InstancePath '.re4craft/hs_err_pid%p.log')),
       '-Dre4craft.background=true','-Dre4craft.testWorld=true','-Dre4craft.voidMirror=true','-Dre4craft.testExitSeconds=0',
       ('-Dre4craft.worldName=' + $Settings.WorldName),'-Dre4craft.grantStarterBow=true',
       ('-Dre4craft.shutdownFile=' + (Assert-ChildPath $Settings.InstancePath '.re4craft/shutdown.request')),
       ('-Dre4craft.shutdownToken=' + $Settings.ShutdownToken),
-      '-Dminecraft.launcher.brand=RE4Craft','-Dminecraft.launcher.version=0.2.0-alpha.2',
+      '-Dminecraft.launcher.brand=RE4Craft','-Dminecraft.launcher.version=0.2.0-alpha.3',
       ('-Djava.library.path=' + $natives + '/java'),('-Djna.tmpdir=' + $natives + '/jna'),
       ('-Dorg.lwjgl.system.SharedLibraryExtractPath=' + $natives + '/lwjgl'),('-Dio.netty.native.workdir=' + $natives + '/netty'),
       '-cp',$classpath,$Payload.MainClass,'--username','Steve','--version','26.3','--gameDir',$Settings.InstancePath,
@@ -236,11 +402,12 @@ function ConvertTo-CreatedUtc([object] $Value) {
     $parsed.UtcDateTime.ToString('o')
 }
 function Get-OwnedSourceProcess([object] $Receipt, [object] $Settings) {
-    if ($Receipt.SchemaVersion -ne 1 -or $Receipt.InstancePath -ne $Settings.InstancePath -or $Receipt.JavaPath -ne $Settings.JavaPath) { return $null }
+    $allowedJava = @($Settings.JavaPath,(Join-Path ([IO.Path]::GetDirectoryName($Settings.JavaPath)) 'java.exe'))
+    if ($Receipt.SchemaVersion -ne 1 -or $Receipt.InstancePath -ne $Settings.InstancePath -or $Receipt.JavaPath -notin $allowedJava) { return $null }
     if ($Receipt.ShutdownToken -notmatch '^[A-Za-z0-9_-]{32,96}$') { return $null }
     if ($Receipt.ArgumentFile -ne (Assert-ChildPath $Settings.InstancePath '.re4craft/launch.args')) { return $null }
     $process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$Receipt.ProcessId) -ErrorAction SilentlyContinue
-    if (-not $process -or -not $process.ExecutablePath -or -not $process.CommandLine -or (Get-FullPath $process.ExecutablePath) -ne $Settings.JavaPath -or (ConvertTo-CreatedUtc $process.CreationDate) -ne (ConvertTo-CreatedUtc $Receipt.CreatedUtc)) { return $null }
+    if (-not $process -or -not $process.ExecutablePath -or -not $process.CommandLine -or (Get-FullPath $process.ExecutablePath) -ne $Receipt.JavaPath -or (ConvertTo-CreatedUtc $process.CreationDate) -ne (ConvertTo-CreatedUtc $Receipt.CreatedUtc)) { return $null }
     # The source is launched by one private argfile; PID alone never proves ownership.
     if ($process.CommandLine -notmatch [regex]::Escape('@' + $Receipt.ArgumentFile)) { return $null }
     $process

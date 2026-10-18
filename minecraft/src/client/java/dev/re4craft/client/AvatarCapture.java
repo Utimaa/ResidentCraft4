@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.QuadInstance;
 import com.mojang.blaze3d.vertex.SheetedDecalTextureGenerator;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import dev.re4craft.client.mixin.*;
 import dev.re4craft.protocol.Wire;
 import dev.re4craft.perf.SampleWindow;
@@ -21,6 +22,7 @@ import net.minecraft.client.model.Model;
 import net.minecraft.client.model.geom.builders.UVPair;
 import net.minecraft.client.renderer.*;
 import net.minecraft.client.renderer.block.MovingBlockRenderState;
+import net.minecraft.client.renderer.block.ModelBlockRenderer;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModelPart;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
@@ -62,8 +64,10 @@ public final class AvatarCapture implements SubmitNodeCollector {
     private final Set<Integer> binaryAlphaTextures = new HashSet<>();
     private final Map<Long,Batch> batches = new LinkedHashMap<>();
     private final Capture vertices = new Capture();
+    private final BlockEntityCapture blockEntities=new BlockEntityCapture(ENTITY_RANGE);
+    private BlockEntityRenderFixture.Geometry observation;
     private int nextTexture = 1, frame;
-    private int entityFrame,lastEntityCount=-1,entityFailures;
+    private int entityFrame,lastEntityCount=-1,lastBlockEntityCount=-1,entityFailures;
     private int consecutiveFailures;
     private String lastEffects = "";
     private final CaptureProfile profile=Boolean.getBoolean("re4craft.profile")?new CaptureProfile():null;
@@ -76,7 +80,7 @@ public final class AvatarCapture implements SubmitNodeCollector {
         }
     }
     public AvatarCapture(BridgeServer server) { this.server = server; }
-    public void reset() { textureIds.clear(); binaryAlphaTextures.clear(); nextTexture = 1; batches.clear(); }
+    public void reset() { textureIds.clear(); binaryAlphaTextures.clear(); nextTexture = 1; batches.clear(); observation=null; }
     public void capture(Minecraft mc) {
         // The linked client's actual render loop is capped at 60 Hz. Capture
         // once per rendered frame: a second wall-clock gate drops jittered
@@ -118,8 +122,7 @@ public final class AvatarCapture implements SubmitNodeCollector {
                 // Vanilla Steve uses an entity-translucent pipeline even when
                 // the entire skin is binary alpha. Real cutout texels and
                 // opaque vertex colors can retain depth/self-occlusion.
-                int flags=b.flags;
-                if(flags==2 && binaryAlphaTextures.contains(b.texture) && b.opaqueVertices)flags=0;
+                int flags=materialFlags(b);
                 payload.putInt(b.texture).putInt(flags).putInt(b.data.size()/4*6);
                 b.write(payload);
             }
@@ -158,6 +161,7 @@ public final class AvatarCapture implements SubmitNodeCollector {
                 vertices.flush();count++;
             }
             var levelState=mc.gameRenderer.gameRenderState().levelRenderState;
+            int blockEntityCount=blockEntities.submit(mc,this,origin,partial,cameraState,levelState);
             PoseStack breakingPose=new PoseStack();
             breakingPose.translate(cameraState.pos.subtract(origin));
             ((LevelRendererAccessor)mc.levelRenderer).re4craft$submitBlockDestroyAnimation(breakingPose,this,levelState);
@@ -174,7 +178,7 @@ public final class AvatarCapture implements SubmitNodeCollector {
             double[] host=Re4CraftClient.hostCoordinates(origin.x,origin.y,origin.z);
             ByteBuffer payload=Wire.buffer(bytes).putInt(3).putInt(++entityFrame).putInt(used.size()).putInt(Re4CraftClient.hostEpoch())
                     .putDouble(host[0]).putDouble(host[1]).putDouble(host[2]);
-            for(Batch batch:used){payload.putInt(batch.texture).putInt(batch.flags).putInt(batch.data.size()/4*6);batch.write(payload);}
+            for(Batch batch:used){payload.putInt(batch.texture).putInt(materialFlags(batch)).putInt(batch.data.size()/4*6);batch.write(payload);}
             server.publishMesh(payload.array());
             if(Boolean.getBoolean("re4craft.effectsTest") && mc.gameDirectory.toPath().getFileName().toString().equals(".qa-void-instance")
                     && System.getProperty("re4craft.worldName","").startsWith("RE4Craft_EffectsQA_")) {
@@ -184,13 +188,25 @@ public final class AvatarCapture implements SubmitNodeCollector {
                 String effects="tntLit="+tntLit+" crackStages="+stages+" crackVertices="+cracks+" whiteVertices="+white+" particles="+(particleVertices>0);
                 if(!effects.equals(lastEffects)){Re4CraftClient.LOG.info("Minecraft effects export: frame={} tntFuse={} {} particleVertices={}",entityFrame,tntFuse,effects,particleVertices);lastEffects=effects;}
             }
-            if(count!=lastEntityCount){Re4CraftClient.LOG.info("Minecraft entity export: {} actual entities, {} vertices, {} batches, range={} blocks",count,total,used.size(),ENTITY_RANGE);lastEntityCount=count;}
+            if(count!=lastEntityCount||blockEntityCount!=lastBlockEntityCount){Re4CraftClient.LOG.info("Minecraft entity export: {} actual entities, {} vertices, {} batches, range={} blocks, {} actual block entities",count,total,used.size(),ENTITY_RANGE,blockEntityCount);lastEntityCount=count;lastBlockEntityCount=blockEntityCount;}
             entityFailures=0;
         } catch(RuntimeException exception){if(entityFailures++==0)Re4CraftClient.LOG.error("Vanilla entity capture failed",exception);}
         finally {if(profile!=null)profile.entities.add(System.nanoTime()-started);}
     }
+    record GeometrySize(int count,boolean opaque){}
+    record GeometryMark(Map<Long,GeometrySize> sizes){}
+    GeometryMark markGeometry(){var sizes=new HashMap<Long,GeometrySize>();for(var entry:batches.entrySet()){var batch=entry.getValue();sizes.put(entry.getKey(),new GeometrySize(batch.data.size(),batch.opaqueVertices));}return new GeometryMark(sizes);}
+    void restoreGeometry(GeometryMark mark){
+        batches.entrySet().removeIf(entry->!mark.sizes.containsKey(entry.getKey()));
+        for(var entry:batches.entrySet()){var batch=entry.getValue();var size=mark.sizes.get(entry.getKey());if(batch.data.size()>size.count)batch.data.subList(size.count,batch.data.size()).clear();batch.opaqueVertices=size.opaque;}
+    }
+    boolean geometryWithinLimits(){int count=0;for(var batch:batches.values()){if(batch.data.size()%4!=0)return false;count+=batch.data.size()/4*6;}return count<=300000&&batches.size()<=256&&40L+batches.size()*12L+count*36L<=Wire.MAX_PAYLOAD;}
+    void flushGeometry(){vertices.flush();}
+    void beginObservation(){observation=new BlockEntityRenderFixture.Geometry();}
+    BlockEntityRenderFixture.Geometry endObservation(){var result=observation;observation=null;return result;}
     private Batch batch(int id) { return batch(id,0); }
     private Batch batch(int id,int flags) {return batches.computeIfAbsent(((long)id<<32)|(flags&0xffffffffL),key->new Batch(id,flags));}
+    private int materialFlags(Batch batch){return batch.flags==2&&binaryAlphaTextures.contains(batch.texture)&&batch.opaqueVertices?0:batch.flags;}
     private @Nullable Batch batchFor(RenderType type) { return batchFor(type,0); }
     private @Nullable Batch batchFor(RenderType type,int extraFlags) {
         RenderTypeAccessor access = (RenderTypeAccessor)type;
@@ -198,7 +214,10 @@ public final class AvatarCapture implements SubmitNodeCollector {
         Object binding = ((RenderSetupAccessor)(Object)access.re4craft$state()).re4craft$textures().get("Sampler0");
         if (binding == null) return null;
         int id = textureId(((TextureBindingAccessor)binding).re4craft$location());
-        return id < 0 ? null : batch(id,(access.re4craft$name().contains("translucent")?2:0)|extraFlags);
+        // Use vanilla's actual blend state: e.g. beacon outer beams blend even
+        // though their render-type name has no "translucent" substring. Cracks
+        // retain the protocol's separate multiplication pass (flag4 alone).
+        return id < 0 ? null : batch(id,((extraFlags&4)==0&&type.hasBlending()?2:0)|extraFlags);
     }
     int textureId(Identifier location) {
         Integer known = textureIds.get(location);
@@ -249,7 +268,7 @@ public final class AvatarCapture implements SubmitNodeCollector {
         } catch(RuntimeException exception) {copy.close();throw exception;}
     }
     private record V(float x,float y,float z,float u,float v,int color) { }
-    private static final class Batch {
+    private final class Batch {
         final int texture;
         final int flags;
         final List<V> data = new ArrayList<>();
@@ -260,6 +279,7 @@ public final class AvatarCapture implements SubmitNodeCollector {
                 throw new IllegalArgumentException("Non-finite avatar vertex");
             if (data.size() >= 200000) throw new IllegalArgumentException("Avatar vertex limit");
             data.add(new V(x,y,z,u,v,color));
+            if(observation!=null)observation.vertex(texture,flags,x,y,z,u,v,color);
             opaqueVertices &= (color>>>24)==255;
         }
         void write(ByteBuffer out) {
@@ -358,8 +378,21 @@ public final class AvatarCapture implements SubmitNodeCollector {
     @Override public void submitTextBackground(PoseStack p,float x0,float y0,float x1,float y1,int color,Font.DisplayMode mode,int light) { }
     @Override public void submitFlame(PoseStack p,EntityRenderState state,Quaternionf rotation) { }
     @Override public void submitLeash(PoseStack p,EntityRenderState.LeashState state) { }
-    @Override public <S> void submitCrumblingOverlay(Model<? super S> model,S state,PoseStack p,RenderType type,int light,int overlay,int color,ModelFeatureRenderer.CrumblingOverlay crumble) { }
-    @Override public void submitMovingBlock(PoseStack p,MovingBlockRenderState state,int outline) { }
+    @Override public <S> void submitCrumblingOverlay(Model<? super S> model,S state,PoseStack p,RenderType type,int light,int overlay,int color,ModelFeatureRenderer.CrumblingOverlay crumble) {
+        int progress=crumble.progress();if(progress<0||progress>=ModelBakery.DESTROY_TYPES.size())return;
+        Batch target=batchFor(ModelBakery.DESTROY_TYPES.get(progress),4);if(target==null)return;
+        vertices.begin(target);model.setupAnim(state);
+        model.renderToBuffer(p,new SheetedDecalTextureGenerator(vertices,crumble.cameraPose(),1),light,overlay,color);vertices.flush();
+    }
+    @Override public void submitMovingBlock(PoseStack p,MovingBlockRenderState state,int outline) {
+        var mc=Minecraft.getInstance();var model=mc.getModelManager().getBlockStateModelSet().get(state.blockState);
+        var renderer=new ModelBlockRenderer(mc.options.ambientOcclusion().get(),false,mc.getBlockColors());
+        renderer.tesselateBlock((x,y,z,quad,instance)->{
+            var material=quad.materialInfo();int texture=textureId(material.sprite().atlasLocation());if(texture<0)return;
+            vertices.begin(batch(texture,material.layer().translucent()?2:0));
+            p.pushPose();p.translate(x,y,z);vertices.putBakedQuad(p.last(),quad,instance);vertices.flush();p.popPose();
+        },0,0,0,state,state.blockPos,state.blockState,model,state.blockState.getSeed(state.randomSeedPos));
+    }
     @Override public void submitBreakingBlockModel(PoseStack p,List<BlockStateModelPart> parts,int progress,boolean translucent) {
         if(progress<0||progress>=ModelBakery.DESTROY_TYPES.size())return;
         Batch target=batchFor(ModelBakery.DESTROY_TYPES.get(progress),4);if(target==null)return;
@@ -370,7 +403,13 @@ public final class AvatarCapture implements SubmitNodeCollector {
         vertices.flush();
     }
     @Override public void submitShapeOutline(PoseStack p,VoxelShape shape,RenderType type,int color,float width,boolean afterTerrain) { }
-    @Override public void submitCustomGeometry(PoseStack p,RenderType type,SubmitNodeCollector.CustomGeometryRenderer renderer) { }
+    @Override public void submitCustomGeometry(PoseStack p,RenderType type,SubmitNodeCollector.CustomGeometryRenderer renderer) {
+        // Original textured quads include beacon beams and several projectile /
+        // block-entity effects. Do not reinterpret lines or shader-only geometry.
+        if(type.primitiveTopology()!=PrimitiveTopology.QUADS)return;
+        Batch target=batchFor(type);if(target==null)return;
+        vertices.begin(target);renderer.render(p.last(),vertices);vertices.flush();
+    }
     @Override public void submitQuadParticleGroup(QuadParticleRenderState particles) { }
     @Override public void submitGizmoPrimitives(DrawableGizmoPrimitives.Group group,CameraRenderState camera,boolean onTop) { }
 }

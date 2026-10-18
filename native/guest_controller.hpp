@@ -16,6 +16,9 @@ bool validGuestMotion(const GuestMotion&,uint32_t epoch,BridgeMode mode);
 bool validBlockBox(const BlockBox&);
 bool nativeEnemyKind(uint32_t kind);
 constexpr bool nativeBreakableKind(uint32_t kind){return kind==0x53;}
+// Retail cEm2a::move routes subtypes1/2 to its mine/trip-wire hit consumer.
+// Other subtypes are bear traps and do not share that destruction contract.
+constexpr bool nativeExplosiveTrap(uint32_t kind,uint32_t subtype){return kind==0x2a&&(subtype==1||subtype==2);}
 constexpr bool nativeBreakableAttack(uint32_t flags){return (flags&(HitFire|HitHazard|HitAlly))==0;}
 bool attachHostDamagePosition(HostDamage&,Vec3 nativeSource,float unitsPerBlock,Vec3 guestFeet);
 Vec3 clipEnemyMotion(Vec3 from,Vec3 to,float radius,float height,const std::vector<BlockBox>&);
@@ -39,6 +42,9 @@ void setGuestDamageSetterFixture(uintptr_t address);
 void setGuestCrateLootFixture(uintptr_t move,uintptr_t allocator,uintptr_t returnAddress,GuestController* owner);
 void runGuestCrateMoveFixture(void* actor);
 uintptr_t guestItemSetFixture();
+bool sampleGuestActorFixture(uintptr_t address,bool minecraft,Enemy& output);
+void setGuestWeaponPowerFixture(uintptr_t original,GuestController* owner);
+uintptr_t guestWeaponPowerFixture();
 #endif
 
 // All writes and calls execute on RE4's verified scheduler/player update thread.
@@ -73,6 +79,7 @@ public:
     void beforeModelMatrix(void*);
     bool constrainEnemyAtari(void*);
     int interceptLife(void* model,int damage,int randomRange,uint32_t flags);
+    int interceptWeaponPower(void* model,uint32_t weapon,int nativePower);
     bool interceptEnemyAttack(void* yarare,void* attackInfo,void* from,void* to);
 private:
     mutable std::mutex mutex_;

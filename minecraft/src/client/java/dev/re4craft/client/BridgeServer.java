@@ -12,6 +12,7 @@ public final class BridgeServer implements AutoCloseable {
     private final ArrayBlockingQueue<Wire.Packet> inputs = new ArrayBlockingQueue<>(256);
     private final LatestFrameMailbox frames=new LatestFrameMailbox();
     private final AtomicReference<Wire.Packet> collision=new AtomicReference<>();
+    private final AtomicReference<Wire.Packet> movingSurfaces=new AtomicReference<>();
     private final AtomicInteger sequence = new AtomicInteger(), generation = new AtomicInteger();
     private volatile Socket peer;
     private volatile ServerSocket listener;
@@ -21,6 +22,7 @@ public final class BridgeServer implements AutoCloseable {
     public boolean connected() { return peer != null && !peer.isClosed(); }
     public Wire.Packet pollEvent() { return inputs.poll(); }
     public byte[] pollCollision() { var packet=collision.getAndSet(null); return packet==null?null:packet.payload(); }
+    public byte[] pollMovingSurfaces() {var packet=movingSurfaces.getAndSet(null);return packet==null?null:packet.payload();}
     public void publishState(byte[] payload) { frames.publish(peer,LatestFrameMailbox.Slot.STATE,packet(Wire.STATE,payload)); }
     public void publishMesh(byte[] payload) {
         Socket socket=peer;if(socket!=null) {
@@ -57,6 +59,7 @@ public final class BridgeServer implements AutoCloseable {
                             Wire.Packet packet = Wire.read(socket.getInputStream());
                             if (packet == null || packet.type() == Wire.GOODBYE) break;
                             if(packet.type()==Wire.COLLISION) {collision.set(packet);continue;}
+                            if(packet.type()==Wire.MOVING_SURFACES) {movingSurfaces.set(packet);continue;}
                             if(packet.type()==Wire.INPUT)Wire.input(packet);
                             else if(packet.type()==Wire.KEY_EVENT)Wire.key(packet);
                             else if(packet.type()==Wire.TEXT)Wire.text(packet);
@@ -97,7 +100,7 @@ public final class BridgeServer implements AutoCloseable {
         }
     }
     private void clear() {
-        inputs.clear();collision.set(null);
+        inputs.clear();collision.set(null);movingSurfaces.set(null);
     }
     @Override public void close() {
         running = false;

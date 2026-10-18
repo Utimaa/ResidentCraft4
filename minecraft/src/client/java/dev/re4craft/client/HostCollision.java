@@ -15,22 +15,31 @@ import net.minecraft.world.phys.Vec3;
 
 /** Immutable streamed terrain shared by the client and its integrated server. */
 public final class HostCollision {
-    private record Frame(HostTerrain terrain,long received) { }
+    private record Frame(HostTerrain terrain,long received,long movingReceived) { }
     private static volatile Frame frame;
     private static volatile Frame exhausted;
     private HostCollision() { }
-    public static void reset() {frame=null;exhausted=null;}
+    private record Rider(int epoch,HostTerrain.Support support) { }
+    private static final java.util.Map<Entity,Rider> riders=java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    private static final ThreadLocal<Long> carrySource=ThreadLocal.withInitial(()->0L);
+    public static void reset() {frame=null;exhausted=null;riders.clear();}
     public static void accept(byte[] payload) {
         try {
             HostTerrain terrain=HostTerrain.decode(payload);
             boolean first=frame==null || frame.terrain.epoch()!=terrain.epoch();
-            frame=new Frame(terrain,System.nanoTime());exhausted=null;
+            long now=System.nanoTime();frame=new Frame(terrain,now,now);exhausted=null;
             if(first)Re4CraftClient.LOG.info("RE4 collision frame: epoch {}, {} valid triangles",terrain.epoch(),terrain.size());
         } catch(IOException error) {Re4CraftClient.LOG.warn("Rejected host collision frame: {}",error.getMessage());frame=null;}
+    }
+    public static void acceptMoving(byte[] payload) {
+        Frame previous=frame;if(previous==null)return;
+        try {HostTerrain terrain=previous.terrain.moving(payload);if(terrain!=previous.terrain){Frame next=new Frame(terrain,previous.received,System.nanoTime());frame=next;if(exhausted==previous)exhausted=next;}}
+        catch(IOException error){Re4CraftClient.LOG.warn("Rejected moving host collision: {}",error.getMessage());frame=null;riders.clear();}
     }
     private static Frame current() {
         Frame f=frame;
         return f!=null && f!=exhausted && System.nanoTime()-f.received<5_000_000_000L
+                && (!f.terrain.movingProtocol() || System.nanoTime()-f.movingReceived<250_000_000L)
                 && Re4CraftClient.hostCollisionReady(f.terrain.epoch())?f:null;
     }
     public static boolean covered(Vec3 minecraftFeet) {
@@ -43,6 +52,7 @@ public final class HostCollision {
         if(f==null)return "no terrain";
         if(!Re4CraftClient.hostCollisionReady(f.terrain.epoch()))return "anchor epoch differs";
         if(System.nanoTime()-f.received>=5_000_000_000L)return "terrain older than 5 seconds";
+        if(f.terrain.movingProtocol()&&System.nanoTime()-f.movingReceived>=250_000_000L)return "moving surfaces older than 250 ms";
         if(f==exhausted)return "movement reached terrain coverage boundary";
         Vec3 p=Re4CraftClient.minecraftToHost(minecraftFeet);
         return f.terrain.covered(p.x,p.y,p.z,2)?"complete terrain coverage":"outside complete terrain coverage";
@@ -96,6 +106,30 @@ public final class HostCollision {
         var hit=f.terrain.cast(a.x,a.y,a.z,b.x,b.y,b.z);
         return hit==null || a.distanceToSqr(new Vec3(hit.x(),hit.y(),hit.z()))>=a.distanceToSqr(b)-1e-4;
     }
+    /** Environmental motion before vanilla travel. The normal player packet
+     * mirrors client carry to the server; applying it twice would add drift. */
+    public static void carry(Entity entity,Vec3 movement) {
+        if(carrySource.get()!=0||!Re4CraftClient.physicsEntity(entity)||entity instanceof net.minecraft.server.level.ServerPlayer
+                ||entity.level().isClientSide()&&!(entity instanceof net.minecraft.client.player.LocalPlayer))return;
+        Frame f=current();Rider rider=riders.get(entity);
+        if(!Re4CraftClient.guestReady()||f==null||!entity.isAlive()){riders.remove(entity);return;}
+        if(rider==null||rider.epoch!=f.terrain.epoch())return;
+        Vec3 feet=Re4CraftClient.minecraftToHost(entity.position());double[] delta=f.terrain.carry(rider.support,feet.x,feet.y,feet.z,entity.onGround(),movement.y);
+        if(delta==null)return;Vec3 displacement=new Vec3(delta[0],delta[1],delta[2]);
+        if(displacement.lengthSqr()<1e-14)return;
+        if(!Re4CraftClient.validCoordinates(entity,entity.position().add(displacement)))return;
+        Vec3 velocity=entity.getDeltaMovement();boolean grounded=entity.onGround();
+        carrySource.set(rider.support.key().source());
+        try {entity.move(net.minecraft.world.entity.MoverType.SHULKER,displacement);}
+        finally {carrySource.remove();entity.setDeltaMovement(velocity);entity.setOnGround(grounded);if(grounded)entity.resetFallDistance();}
+    }
+    public static void rememberSupport(Entity entity) {
+        if(carrySource.get()!=0||!Re4CraftClient.physicsEntity(entity)||entity instanceof net.minecraft.server.level.ServerPlayer
+                ||entity.level().isClientSide()&&!(entity instanceof net.minecraft.client.player.LocalPlayer))return;
+        Frame f=current();if(!Re4CraftClient.guestReady()||f==null||!entity.isAlive()||!entity.onGround()){riders.remove(entity);return;}
+        Vec3 feet=Re4CraftClient.minecraftToHost(entity.position());HostTerrain.Support support=f.terrain.support(feet.x,feet.y,feet.z);
+        if(support==null)riders.remove(entity);else riders.put(entity,new Rider(f.terrain.epoch(),support));
+    }
     /** Minecraft computes velocity and block collision first; the exact host mesh limits it. */
     public static Vec3 collide(Entity player,Vec3 move) {
         if(!Re4CraftClient.physicsEntity(player))return move;
@@ -116,7 +150,7 @@ public final class HostCollision {
         Vec3 hi=Re4CraftClient.minecraftToHost(new Vec3(box.maxX,box.maxY,box.maxZ));
         var tris=f.terrain.near(Math.min(lo.x,lo.x+move.x)-1,Math.min(lo.y,lo.y+move.y)-1-step,
                 Math.min(lo.z,lo.z+move.z)-1,Math.max(hi.x,hi.x+move.x)+1,
-                Math.max(hi.y,hi.y+move.y)+1+step,Math.max(hi.z,hi.z+move.z)+1);
+                Math.max(hi.y,hi.y+move.y)+1+step,Math.max(hi.z,hi.z+move.z)+1,carrySource.get());
         double[] r=HostTriangleCollider.resolve(tris,feet.x,feet.y,feet.z,box.getXsize()/2,
                 box.getYsize(),step,player.onGround(),move.x,move.y,move.z);
         if(r[0]==move.x && r[1]==move.y && r[2]==move.z)return move;

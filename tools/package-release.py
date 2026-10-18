@@ -6,7 +6,7 @@ import shutil
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.2.0-alpha.2'
+VERSION = '0.2.0-alpha.3'
 DIST = ROOT / 'dist'
 REPO = DIST / 'RE4Craft-github'
 PACKAGE = DIST / f'RE4Craft-{VERSION}-Windows.zip'
@@ -27,11 +27,11 @@ def tree(folder, suffixes):
 selected = [ROOT / name for name in (
     'README.md','INSTALL.md','PUBLISH.md','RELEASE_NOTES.md','CHANGELOG.md',
     'LICENSE','THIRD-PARTY-NOTICES.md','RE4Craft.ini',
-    'docs/PROTOCOL.md','docs/RELEASE_VALIDATION.md',
+    'docs/PROTOCOL.md','docs/RELEASE_VALIDATION.md','docs/LAUNCHER.md','docs/native-script-handoff.md',
     'tools/common.ps1','tools/install.ps1','tools/uninstall.ps1','tools/inspect-install.ps1',
     'tools/fetch-asi-loader.ps1','tools/fetch-fabric.ps1','tools/build-release.ps1',
     'tools/prepare-release-dependencies.ps1','tools/package-release.py',
-    'tools/probe-native-boxes.py','tools/probe_loot.py','tools/qa-loot.ps1',
+    'tools/probe-native-boxes.py','tools/probe-native-special-combat.py','tools/probe-native-u3.py','tools/probe_loot.py','tools/qa-loot.ps1',
     'protocol/re4craft_protocol.h',
     'minecraft/build.gradle','minecraft/settings.gradle','minecraft/gradle.properties',
     'minecraft/gradlew','minecraft/gradlew.bat','minecraft/LICENSE-SkyCraft',
@@ -88,7 +88,7 @@ data={f'payload/{name}':path.read_bytes() for name,path in payload.items()}
 data['payload/fabric-launch.json']=json.dumps(launch,indent=2).encode('utf-8')
 payload_manifest=dict(SchemaVersion=1,Version=VERSION,Files=[dict(Path=name.removeprefix('payload/'),Sha256=hashlib.sha256(value).hexdigest()) for name,value in sorted(data.items())])
 data['payload/manifest.json']=json.dumps(payload_manifest,indent=2).encode('utf-8')
-for name in ('README.md','INSTALL.md','LICENSE','THIRD-PARTY-NOTICES.md','CHANGELOG.md','RELEASE_NOTES.md','docs/RELEASE_VALIDATION.md'):
+for name in ('README.md','INSTALL.md','LICENSE','THIRD-PARTY-NOTICES.md','CHANGELOG.md','RELEASE_NOTES.md','docs/RELEASE_VALIDATION.md','docs/LAUNCHER.md'):
     data[name]=files[name]
 for name,value in files.items():
     if name.startswith('release/') and name.endswith('.ps1') and '/tests/' not in name:

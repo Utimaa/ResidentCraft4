@@ -240,7 +240,7 @@ void Transport::reset(bool releaseInput){
 }
 bool Transport::sendPacket(Message type,std::vector<uint8_t> payload){
     if(!connected_||payload.size()>MaxPayload)return false;
-    if(type!=Message::KeyEvent&&type!=Message::Text&&type!=Message::Collision&&type!=Message::Enemies&&type!=Message::Damage&&type!=Message::Loot)return false;
+    if(type!=Message::KeyEvent&&type!=Message::Text&&type!=Message::Collision&&type!=Message::MovingSurfaces&&type!=Message::Enemies&&type!=Message::Damage&&type!=Message::Loot)return false;
     if(type==Message::Loot){
         HostLoot loot{};size_t at=0;
         if(payload.size()!=sizeof(loot)||!read(payload,at,loot)||!loot.epoch||!loot.eventId||!loot.sessionId
@@ -248,7 +248,7 @@ bool Transport::sendPacket(Message type,std::vector<uint8_t> payload){
            ||std::abs(loot.x)>30000000.||std::abs(loot.y)>30000000.||std::abs(loot.z)>30000000.)return false;
     }
     std::lock_guard lock(mutex_);
-    if(type==Message::Collision||type==Message::Enemies){for(auto it=outgoing_.begin();it!=outgoing_.end();)if(it->type==type)it=outgoing_.erase(it);else ++it;}
+    if(type==Message::Collision||type==Message::MovingSurfaces||type==Message::Enemies){for(auto it=outgoing_.begin();it!=outgoing_.end();)if(it->type==type)it=outgoing_.erase(it);else ++it;}
     if(outgoing_.size()>=256)return false;
     outgoing_.push_back({type,std::move(payload)});return true;
 }
