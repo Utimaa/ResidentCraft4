@@ -24,7 +24,10 @@ inline bool memory(uintptr_t address,size_t size,bool writable=false) {
     return true;
 }
 inline bool copy(uintptr_t address,void* out,size_t size) {
-    if(!memory(address,size))return false;
+    // Hot paths read native memory thousands of times per frame. A VirtualQuery
+    // per read dominated frame time, so reads rely on SEH alone; writes and
+    // explicit memory() checks still validate protection first.
+    if(address<0x10000||size>UINTPTR_MAX-address)return false;
     __try {std::memcpy(out,reinterpret_cast<void*>(address),size);return true;}
     __except(EXCEPTION_EXECUTE_HANDLER){return false;}
 }
