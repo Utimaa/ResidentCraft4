@@ -42,6 +42,7 @@ EndSceneFn originalEndScene{};ResetFn originalReset{};PresentFn originalPresent{
 std::atomic<bool> graphicsReady{false};
 HMODULE pluginModule{};
 std::mutex logMutex,renderMutex;
+bool clipCursorEnabled=true;
 std::wstring root;
 FILE* logFile{};
 GameAccess* game{};Renderer* renderer{};Transport* transport{};
@@ -151,6 +152,7 @@ void loadSettings(){
     ySign=GetPrivateProfileIntW(L"Bridge",L"YSign",1,ini.c_str())<0?-1.f:1.f;
     feetOffset=static_cast<float>(GetPrivateProfileIntW(L"Bridge",L"FeetOffset",0,ini.c_str()));
     hostAuthority=GetPrivateProfileIntW(L"Bridge",L"HostAuthority",0,ini.c_str())!=0;
+    clipCursorEnabled=GetPrivateProfileIntW(L"Bridge",L"ClipCursor",1,ini.c_str())!=0;
     const std::pair<const wchar_t*,int*> bindings[]{{L"Forward",&forwardKey},{L"Back",&backKey},{L"Left",&leftKey},{L"Right",&rightKey},{L"Sneak",&sneakKey},{L"Sprint",&sprintKey},{L"Inventory",&inventoryKey},{L"Drop",&dropKey},{L"Chat",&chatKey}};
     for(auto [name,key]:bindings){int binding=GetPrivateProfileIntW(L"Controls",name,*key,ini.c_str());if(binding>0&&binding<256)*key=binding;}
     const std::pair<const wchar_t*,int*> haloBindings[]{{L"Crouch",&haloCrouchKey},{L"Reload",&haloReloadKey},{L"Grenade",&haloGrenadeKey},{L"Melee",&haloMeleeKey},{L"Use",&haloUseKey},{L"Weapon",&haloWeaponKey}};
@@ -707,6 +709,27 @@ bool installHooks(){
     logMessage(cleaned.cleanupComplete?"Native D3D9 setup timed out; all hooks owned by the failed attempt were removed.":"Native D3D9 setup timed out; owned-hook cleanup remains incomplete and graphics callbacks stay inactive.");
     return false;
 }
+// Keep the cursor inside RE4 during gameplay. On multi-monitor setups a click
+// on another screen otherwise steals focus. Menus, pause and the briefcase
+// leave the cursor free so the player can switch windows; Alt+Tab always
+// moves the foreground elsewhere and releases the clip.
+bool cursorGameplay(){
+    if(!game)return false;const auto s=game->sample();
+    return s.valid&&s.playing&&!s.paused;
+}
+DWORD WINAPI cursorClipLoop(void*){
+    bool clipped=false;
+    for(;;){
+        HWND foreground=GetForegroundWindow();DWORD pid{};if(foreground)GetWindowThreadProcessId(foreground,&pid);
+        RECT client{};
+        if(clipCursorEnabled&&foreground&&pid==GetCurrentProcessId()&&cursorGameplay()&&!IsIconic(foreground)&&GetClientRect(foreground,&client)&&client.right>client.left&&client.bottom>client.top){
+            POINT topLeft{client.left,client.top},bottomRight{client.right,client.bottom};ClientToScreen(foreground,&topLeft);ClientToScreen(foreground,&bottomRight);
+            RECT wanted{topLeft.x,topLeft.y,bottomRight.x,bottomRight.y},current{};
+            if(!GetClipCursor(&current)||!EqualRect(&current,&wanted))ClipCursor(&wanted);clipped=true;
+        }else if(clipped){ClipCursor(nullptr);clipped=false;}
+        Sleep(100);
+    }
+}
 DWORD WINAPI initialize(void*){
     configure();logMessage("RE4Craft v0.2.0-alpha.2 protocol6: original UHD x86; compiled " __DATE__ " " __TIME__ "; starts disabled");
     game=new GameAccess();
@@ -723,6 +746,7 @@ DWORD WINAPI initialize(void*){
         logMessage("Native window callback unavailable; contextual landing handoff is disabled.");
     if(!installHooks()){logMessage("D3D9 hook setup failed; no player replacement enabled");return 0;}
     for(auto& backend:backends)if(backendAvailable(backend.mode))backend.transport->start(backend.port);graphicsReady.store(true,std::memory_order_release);
+    if(HANDLE clipper=CreateThread(nullptr,0,cursorClipLoop,nullptr,0,nullptr))CloseHandle(clipper);
     logMessage("D3D9 hooks installed. F8 Minecraft; F7 BeamNG preserved; Halo on hold, ULTRAKILL cancelled; F2 native Leon protection.");return 0;
 }
 }
