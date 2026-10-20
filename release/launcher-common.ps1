@@ -258,7 +258,7 @@ function Find-RE4Installation {
             foreach ($match in [regex]::Matches($contents, '"path"\s+"([^"\r\n]+)"')) { $libraries += $match.Groups[1].Value.Replace('\\','\') }
         }
     }
-    $matches = @($libraries | ForEach-Object { Join-Path $_ 'steamapps/common/Resident Evil 4' } | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'Bin32/bio4.exe') -PathType Leaf } | Sort-Object -Unique)
+    $matches = @($libraries | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | ForEach-Object { Join-Path $_ 'steamapps/common/Resident Evil 4' } | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'Bin32/bio4.exe') -PathType Leaf } | Sort-Object -Unique)
     if ($matches.Count -eq 1) { return Get-FullPath $matches[0] }
     if ($matches.Count -gt 1) { throw 'Several RE4 installations were found. Run Setup with -GamePath to choose one.' }
     throw 'RE4 UHD was not found. Run Setup with -GamePath pointing to the Resident Evil 4 folder.'
