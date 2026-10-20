@@ -5,6 +5,20 @@
 namespace re4craft { namespace {
 HostInput* current{};
 LRESULT CALLBACK bridgeProcedure(HWND h,UINT m,WPARAM w,LPARAM l){return current?current->message(h,m,w,l):DefWindowProcW(h,m,w,l);}
+// WM_MOUSEWHEEL reaches the focus window through every subclass installed by
+// RE4 and other mods (re4_tweaks' ImGui), and was intermittently consumed
+// before ours. A low-level mouse hook sees the wheel before any window does.
+std::atomic<bool> wheelHookReady{};
+LRESULT CALLBACK wheelProcedure(int code,WPARAM w,LPARAM l){
+    if(code==HC_ACTION&&w==WM_MOUSEWHEEL&&current)current->wheel(GET_WHEEL_DELTA_WPARAM(reinterpret_cast<MSLLHOOKSTRUCT*>(l)->mouseData));
+    return CallNextHookEx(nullptr,code,w,l);
+}
+DWORD WINAPI wheelThread(void*){
+    HMODULE module{};GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(&wheelProcedure),&module);
+    HHOOK hook=SetWindowsHookExW(WH_MOUSE_LL,wheelProcedure,module,0);if(!hook)return 0;
+    wheelHookReady=true;MSG message{};while(GetMessageW(&message,nullptr,0,0)>0){}
+    wheelHookReady=false;UnhookWindowsHookEx(hook);return 0;
+}
 uint32_t scancode(WPARAM vk,LPARAM flags){
     uint32_t make=uint32_t((flags>>16)&255);if(!make)make=MapVirtualKeyExW(UINT(vk),MAPVK_VK_TO_VSC_EX,GetKeyboardLayout(0))&255;
     return sdlPhysicalScancode(make,(flags&(1LL<<24))!=0);
@@ -33,7 +47,13 @@ bool HostInput::attach(IDirect3DDevice9* device,Transport* transport,CameraContr
     window_=params.hFocusWindow;current=this;
     SetLastError(0);auto old=SetWindowLongPtrW(window_,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(&bridgeProcedure));
     if(!old&&GetLastError()){window_=nullptr;current=nullptr;return false;}original_=reinterpret_cast<WNDPROC>(old);
-    RAWINPUTDEVICE raw{1,2,RIDEV_INPUTSINK,window_};RegisterRawInputDevices(&raw,1,sizeof(raw));return true;
+    RAWINPUTDEVICE raw{1,2,RIDEV_INPUTSINK,window_};RegisterRawInputDevices(&raw,1,sizeof(raw));
+    if(HANDLE thread=CreateThread(nullptr,0,wheelThread,nullptr,0,nullptr))CloseHandle(thread);
+    return true;
+}
+void HostInput::wheel(int delta){
+    DWORD foregroundPid{};GetWindowThreadProcessId(GetForegroundWindow(),&foregroundPid);
+    if(active_&&GetTickCount64()-heartbeat_.load()<=750&&foregroundPid==GetCurrentProcessId())scroll_.fetch_add(delta);
 }
 void HostInput::sample(Input& input){
     RECT rect{};if(window_)GetClientRect(window_,&rect);input.viewportWidth=std::clamp<LONG>(rect.right,1,16384);input.viewportHeight=std::clamp<LONG>(rect.bottom,1,16384);
@@ -62,7 +82,7 @@ LRESULT HostInput::message(HWND h,UINT m,WPARAM w,LPARAM l){
             }
             return DefWindowProcW(h,m,w,l);
         }
-        if(m==WM_MOUSEWHEEL){scroll_.fetch_add(GET_WHEEL_DELTA_WPARAM(w));return 0;}
+        if(m==WM_MOUSEWHEEL){if(!wheelHookReady)scroll_.fetch_add(GET_WHEEL_DELTA_WPARAM(w));return 0;}
         auto* peer=transport_.load(std::memory_order_acquire);
         if(screen_&&peer){
             if(m==WM_KEYDOWN||m==WM_KEYUP||m==WM_SYSKEYDOWN||m==WM_SYSKEYUP){
