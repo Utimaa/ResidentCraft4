@@ -36,7 +36,8 @@ bool readable(uintptr_t address, size_t count, bool write = false) {
     return true;
 }
 bool copyMemory(uintptr_t address, void* destination, size_t size) {
-    if (!readable(address, size)) return false;
+    // SEH-only read: see hookdetail::copy. Writes still use readable().
+    if (address < 0x10000 || size > UINTPTR_MAX - address) return false;
     __try { std::memcpy(destination, reinterpret_cast<const void*>(address), size); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
